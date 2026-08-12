@@ -1,4 +1,4 @@
-"""Lightweight, one-hop diabetes subgraph extraction for OptimusKG.
+"""Lightweight, configurable-hop diabetes subgraph extraction for OptimusKG.
 
 This module deliberately uses PyArrow instead of loading OptimusKG into
 NetworkX or a single in-memory dataframe.  Parquet column projection and
@@ -67,6 +67,7 @@ EDGE_SCHEMA = pa.schema(
         ("evidence_score", pa.float64()),
         ("evidence_count", pa.int64()),
         ("highest_clinical_trial_phase", pa.float64()),
+        ("discovered_hop", pa.int32()),
     ]
 )
 
@@ -78,6 +79,7 @@ NODE_SCHEMA = pa.schema(
         ("name", pa.large_string()),
         ("symbol", pa.large_string()),
         ("is_seed", pa.bool_()),
+        ("hop_distance", pa.int32()),
     ]
 )
 
@@ -189,6 +191,16 @@ def _read_edge_table(
     )
 
 
+def _empty_edge_table(path: Path, columns: Sequence[str]) -> pa.Table:
+    """Return a projected empty table using a filter that cannot match an ID."""
+
+    return pq.read_table(
+        path,
+        columns=list(columns),
+        filters=[("from", "=", "__OPTIMUSKG_NO_SUCH_NODE__")],
+    )
+
+
 def _deduplicate_edges(table: pa.Table) -> pa.Table:
     rows = {}
     for row in table.to_pylist():
@@ -209,24 +221,40 @@ def _limit_table(
 
 def extract_edges(
     kg_root: Path,
-    disease_ids: Sequence[str],
+    frontier: dict[str, set[str]],
     max_edges_per_type: int,
+    discovered_hop: int,
     edge_types: Sequence[str] = EDGE_TYPES,
 ) -> dict[str, pa.Table]:
-    """Extract only direct edges touching the disease seed(s)."""
+    """Extract one BFS layer of edges touching the typed frontier nodes."""
 
     result: dict[str, pa.Table] = {}
     edge_root = kg_root / "edges"
 
     if "disease_disease" in edge_types:
         columns = ["from", "to", "label", "relation", "undirected"]
-        outgoing = _read_edge_table(
-            edge_root / "disease_disease.parquet", columns, "from", disease_ids
+        disease_ids = sorted(frontier.get("disease", set()))
+        parts = []
+        if disease_ids:
+            parts.extend(
+                [
+                    _read_edge_table(
+                        edge_root / "disease_disease.parquet",
+                        columns,
+                        "from",
+                        disease_ids,
+                    ),
+                    _read_edge_table(
+                        edge_root / "disease_disease.parquet",
+                        columns,
+                        "to",
+                        disease_ids,
+                    ),
+                ]
+            )
+        table = _deduplicate_edges(pa.concat_tables(parts)) if parts else _empty_edge_table(
+            edge_root / "disease_disease.parquet", columns
         )
-        incoming = _read_edge_table(
-            edge_root / "disease_disease.parquet", columns, "to", disease_ids
-        )
-        table = _deduplicate_edges(pa.concat_tables([outgoing, incoming]))
         result["disease_disease"] = _limit_table(
             table, max_edges_per_type, [("from", "ascending"), ("to", "ascending")]
         )
@@ -241,8 +269,19 @@ def extract_edges(
             "properties.evidence_score",
             "properties.evidence_count",
         ]
-        table = _read_edge_table(
-            edge_root / "disease_gene.parquet", columns, "from", disease_ids
+        parts = []
+        if frontier.get("disease"):
+            parts.append(_read_edge_table(
+                edge_root / "disease_gene.parquet", columns, "from",
+                sorted(frontier["disease"]),
+            ))
+        if frontier.get("gene"):
+            parts.append(_read_edge_table(
+                edge_root / "disease_gene.parquet", columns, "to",
+                sorted(frontier["gene"]),
+            ))
+        table = _deduplicate_edges(pa.concat_tables(parts)) if parts else _empty_edge_table(
+            edge_root / "disease_gene.parquet", columns
         )
         result["disease_gene"] = _limit_table(
             table,
@@ -252,8 +291,19 @@ def extract_edges(
 
     if "disease_phenotype" in edge_types:
         columns = ["from", "to", "label", "relation", "undirected"]
-        table = _read_edge_table(
-            edge_root / "disease_phenotype.parquet", columns, "from", disease_ids
+        parts = []
+        if frontier.get("disease"):
+            parts.append(_read_edge_table(
+                edge_root / "disease_phenotype.parquet", columns, "from",
+                sorted(frontier["disease"]),
+            ))
+        if frontier.get("phenotype"):
+            parts.append(_read_edge_table(
+                edge_root / "disease_phenotype.parquet", columns, "to",
+                sorted(frontier["phenotype"]),
+            ))
+        table = _deduplicate_edges(pa.concat_tables(parts)) if parts else _empty_edge_table(
+            edge_root / "disease_phenotype.parquet", columns
         )
         result["disease_phenotype"] = _limit_table(
             table, max_edges_per_type, [("to", "ascending")]
@@ -268,8 +318,19 @@ def extract_edges(
             "undirected",
             "properties.highest_clinical_trial_phase",
         ]
-        table = _read_edge_table(
-            edge_root / "drug_disease.parquet", columns, "to", disease_ids
+        parts = []
+        if frontier.get("disease"):
+            parts.append(_read_edge_table(
+                edge_root / "drug_disease.parquet", columns, "to",
+                sorted(frontier["disease"]),
+            ))
+        if frontier.get("drug"):
+            parts.append(_read_edge_table(
+                edge_root / "drug_disease.parquet", columns, "from",
+                sorted(frontier["drug"]),
+            ))
+        table = _deduplicate_edges(pa.concat_tables(parts)) if parts else _empty_edge_table(
+            edge_root / "drug_disease.parquet", columns
         )
         result["drug_disease"] = _limit_table(
             table,
@@ -286,8 +347,19 @@ def extract_edges(
             "undirected",
             "properties.evidence_count",
         ]
-        table = _read_edge_table(
-            edge_root / "exposure_disease.parquet", columns, "to", disease_ids
+        parts = []
+        if frontier.get("disease"):
+            parts.append(_read_edge_table(
+                edge_root / "exposure_disease.parquet", columns, "to",
+                sorted(frontier["disease"]),
+            ))
+        if frontier.get("exposure"):
+            parts.append(_read_edge_table(
+                edge_root / "exposure_disease.parquet", columns, "from",
+                sorted(frontier["exposure"]),
+            ))
+        table = _deduplicate_edges(pa.concat_tables(parts)) if parts else _empty_edge_table(
+            edge_root / "exposure_disease.parquet", columns
         )
         result["exposure_disease"] = _limit_table(
             table,
@@ -298,57 +370,85 @@ def extract_edges(
     return result
 
 
-def compact_edges(edge_tables: dict[str, pa.Table]) -> pa.Table:
+def compact_edges(edge_tables: dict[str, list[tuple[int, pa.Table]]]) -> pa.Table:
     rows: list[dict[str, Any]] = []
-    for edge_type, table in edge_tables.items():
-        for raw in table.to_pylist():
-            rows.append(
-                {
-                    "from": raw.get("from"),
-                    "to": raw.get("to"),
-                    "label": raw.get("label"),
-                    "relation": raw.get("relation"),
-                    "undirected": raw.get("undirected"),
-                    "edge_type": edge_type,
-                    "evidence_score": raw.get("evidence_score"),
-                    "evidence_count": raw.get("evidence_count"),
-                    "highest_clinical_trial_phase": raw.get(
-                        "highest_clinical_trial_phase"
-                    ),
-                }
-            )
+    seen = set()
+    for edge_type, hop_tables in edge_tables.items():
+        for discovered_hop, table in hop_tables:
+            for raw in table.to_pylist():
+                key = (edge_type, raw.get("from"), raw.get("to"), raw.get("relation"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    {
+                        "from": raw.get("from"),
+                        "to": raw.get("to"),
+                        "label": raw.get("label"),
+                        "relation": raw.get("relation"),
+                        "undirected": raw.get("undirected"),
+                        "edge_type": edge_type,
+                        "evidence_score": raw.get("evidence_score"),
+                        "evidence_count": raw.get("evidence_count"),
+                        "highest_clinical_trial_phase": raw.get(
+                            "highest_clinical_trial_phase"
+                        ),
+                        "discovered_hop": discovered_hop,
+                    }
+                )
     return pa.Table.from_pylist(rows, schema=EDGE_SCHEMA)
 
 
-def collect_node_ids(
-    seed_ids: Sequence[str], edge_tables: dict[str, pa.Table]
-) -> dict[str, set[str]]:
-    node_ids: dict[str, set[str]] = defaultdict(set)
-    node_ids["disease"].update(seed_ids)
-    for edge_type, table in edge_tables.items():
-        for row in table.select(["from", "to"]).to_pylist():
-            if edge_type == "disease_disease":
-                node_ids["disease"].update([row["from"], row["to"]])
-            elif edge_type == "disease_gene":
-                node_ids["gene"].add(row["to"])
-            elif edge_type == "disease_phenotype":
-                node_ids["phenotype"].add(row["to"])
-            elif edge_type == "drug_disease":
-                node_ids["drug"].add(row["from"])
-            elif edge_type == "exposure_disease":
-                node_ids["exposure"].add(row["from"])
-    return node_ids
+def edge_node_types(edge_type: str, row: dict[str, Any]) -> tuple[tuple[str, str], tuple[str, str]]:
+    endpoint_types = {
+        "disease_disease": ("disease", "disease"),
+        "disease_gene": ("disease", "gene"),
+        "disease_phenotype": ("disease", "phenotype"),
+        "drug_disease": ("drug", "disease"),
+        "exposure_disease": ("exposure", "disease"),
+    }
+    from_type, to_type = endpoint_types[edge_type]
+    return (from_type, row["from"]), (to_type, row["to"])
+
+
+def traverse_edges(
+    kg_root: Path,
+    seed_ids: Sequence[str],
+    hops: int,
+    max_edges_per_type: int,
+    edge_types: Sequence[str],
+) -> tuple[dict[str, list[tuple[int, pa.Table]]], dict[tuple[str, str], int]]:
+    distances = {("disease", seed_id): 0 for seed_id in seed_ids}
+    frontier: dict[str, set[str]] = {"disease": set(seed_ids)}
+    all_edges: dict[str, list[tuple[int, pa.Table]]] = defaultdict(list)
+
+    for hop in range(1, hops + 1):
+        layer = extract_edges(
+            kg_root, frontier, max_edges_per_type, hop, edge_types
+        )
+        next_frontier: dict[str, set[str]] = defaultdict(set)
+        for edge_type, table in layer.items():
+            all_edges[edge_type].append((hop, table))
+            for row in table.select(["from", "to"]).to_pylist():
+                for typed_id in edge_node_types(edge_type, row):
+                    if typed_id not in distances:
+                        distances[typed_id] = hop
+                        next_frontier[typed_id[0]].add(typed_id[1])
+        frontier = next_frontier
+        if not frontier:
+            break
+    return dict(all_edges), distances
 
 
 def extract_nodes(
     kg_root: Path,
-    node_ids: dict[str, set[str]],
+    distances: dict[tuple[str, str], int],
     seed_ids: Sequence[str],
 ) -> pa.Table:
     rows: list[dict[str, Any]] = []
     seed_set = set(seed_ids)
     for entity_type in ("disease", "gene", "phenotype", "drug", "exposure"):
-        ids = sorted(node_ids.get(entity_type, set()))
+        ids = sorted(node_id for (kind, node_id) in distances if kind == entity_type)
         if not ids:
             continue
         columns = ["id", "label", "properties.name"]
@@ -369,6 +469,7 @@ def extract_nodes(
                     "name": raw.get("name"),
                     "symbol": raw.get("symbol"),
                     "is_seed": raw["id"] in seed_set,
+                    "hop_distance": distances[(entity_type, raw["id"])],
                 }
             )
     return pa.Table.from_pylist(rows, schema=NODE_SCHEMA)
@@ -386,7 +487,7 @@ def validate_subgraph(
     nodes: pa.Table,
     edges: pa.Table,
     seed_ids: Sequence[str],
-    edge_counts: dict[str, int],
+    hops: int,
     max_edges_per_type: int,
 ) -> None:
     """Fail before hand-off if the compact output violates demo guarantees."""
@@ -398,21 +499,22 @@ def validate_subgraph(
     if missing_seeds:
         raise RuntimeError(f"Seed nodes are missing from output: {sorted(missing_seeds)}")
 
-    seed_set = set(seed_ids)
     for edge in edges.select(["from", "to"]).to_pylist():
         if edge["from"] not in node_ids or edge["to"] not in node_ids:
             raise RuntimeError(f"Edge endpoint is missing from nodes: {edge}")
-        if edge["from"] not in seed_set and edge["to"] not in seed_set:
-            raise RuntimeError(f"Non-one-hop edge found: {edge}")
+
+    node_hops = nodes["hop_distance"].to_pylist()
+    if node_hops and max(node_hops) > hops:
+        raise RuntimeError("A node exceeds the requested hop distance.")
 
     if max_edges_per_type > 0:
-        over_limit = {
-            name: count
-            for name, count in edge_counts.items()
-            if count > max_edges_per_type
-        }
+        layer_counts: dict[tuple[str, int], int] = defaultdict(int)
+        for edge in edges.select(["edge_type", "discovered_hop"]).to_pylist():
+            layer_counts[(edge["edge_type"], edge["discovered_hop"])] += 1
+        over_limit = {key: count for key, count in layer_counts.items()
+                      if count > max_edges_per_type}
         if over_limit:
-            raise RuntimeError(f"Per-type edge limit was exceeded: {over_limit}")
+            raise RuntimeError(f"Per-hop/type edge limit was exceeded: {over_limit}")
 
 
 def write_candidates(candidates: Sequence[dict[str, Any]], path: Path) -> None:
@@ -427,11 +529,14 @@ def run_extraction(
     query: str = DEFAULT_QUERY,
     root_name: str = DEFAULT_ROOT_NAME,
     root_id: str | None = None,
+    hops: int = 1,
     max_edges_per_type: int = 25,
     edge_types: Sequence[str] = EDGE_TYPES,
 ) -> dict[str, Any]:
     if max_edges_per_type < 0:
         raise ValueError("--max-edges-per-type must be >= 0 (0 means unlimited).")
+    if hops < 0:
+        raise ValueError("--hops must be >= 0.")
     unknown = sorted(set(edge_types) - set(EDGE_TYPES))
     if unknown:
         raise ValueError(f"Unknown edge type(s): {', '.join(unknown)}")
@@ -444,12 +549,12 @@ def run_extraction(
     root = choose_root(candidates, root_id)
     seed_ids = [root["id"]]
 
-    edge_tables = extract_edges(kg_root, seed_ids, max_edges_per_type, edge_types)
+    edge_tables, distances = traverse_edges(
+        kg_root, seed_ids, hops, max_edges_per_type, edge_types
+    )
     edges = compact_edges(edge_tables)
-    node_ids = collect_node_ids(seed_ids, edge_tables)
-    nodes = extract_nodes(kg_root, node_ids, seed_ids)
-    edge_counts = {name: table.num_rows for name, table in edge_tables.items()}
-    validate_subgraph(nodes, edges, seed_ids, edge_counts, max_edges_per_type)
+    nodes = extract_nodes(kg_root, distances, seed_ids)
+    validate_subgraph(nodes, edges, seed_ids, hops, max_edges_per_type)
 
     pq.write_table(nodes, output_dir / "nodes.parquet", compression="zstd")
     pq.write_table(edges, output_dir / "edges.parquet", compression="zstd")
@@ -460,19 +565,25 @@ def run_extraction(
     node_counts = defaultdict(int)
     for entity_type in nodes["entity_type"].to_pylist():
         node_counts[entity_type] += 1
+    edge_counts: dict[str, int] = defaultdict(int)
+    hop_edge_counts: dict[str, int] = defaultdict(int)
+    for row in edges.select(["edge_type", "discovered_hop"]).to_pylist():
+        edge_counts[row["edge_type"]] += 1
+        hop_edge_counts[str(row["discovered_hop"])] += 1
     summary = {
         "kg_root": str(kg_root),
         "output_dir": str(output_dir),
         "query": query,
         "root": root,
-        "hop_limit": 1,
+        "hop_limit": hops,
         "max_edges_per_type": max_edges_per_type,
         "node_counts": dict(sorted(node_counts.items())),
-        "edge_counts": edge_counts,
+        "edge_counts": dict(sorted(edge_counts.items())),
+        "hop_edge_counts": dict(sorted(hop_edge_counts.items(), key=lambda item: int(item[0]))),
         "total_nodes": nodes.num_rows,
         "total_edges": edges.num_rows,
         "validation": {
-            "one_hop_only": True,
+            "requested_hop_limit_respected": True,
             "all_edge_endpoints_resolved": True,
             "unique_node_ids": True,
             "edge_limits_respected": True,
@@ -489,7 +600,7 @@ def run_extraction(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract a compact one-hop diabetes subgraph from local OptimusKG Parquet files."
+        description="Extract a compact N-hop diabetes subgraph from local OptimusKG Parquet files."
     )
     parser.add_argument("--kg-root", type=Path, default=DEFAULT_KG_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
@@ -500,10 +611,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit disease seed ID. Default: auto-select the best exact-name match.",
     )
     parser.add_argument(
+        "--hops",
+        type=int,
+        default=1,
+        help="BFS hop count from the disease seed (default: 1; 0 writes only the seed).",
+    )
+    parser.add_argument(
         "--max-edges-per-type",
         type=int,
         default=25,
-        help="Maximum retained edges for each relation file; 0 means unlimited.",
+        help="Maximum retained edges per hop and relation type; 0 means unlimited.",
     )
     parser.add_argument(
         "--edge-types",
@@ -522,6 +639,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         query=args.query,
         root_name=args.root_name,
         root_id=args.root_id,
+        hops=args.hops,
         max_edges_per_type=args.max_edges_per_type,
         edge_types=args.edge_types,
     )
