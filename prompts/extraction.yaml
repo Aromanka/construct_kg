@@ -1,0 +1,41 @@
+prompts:
+  general:
+    name: extraction_general
+    version: v1
+    system_prompt: >-
+      Extract biomedical assertions supported by the supplied paper. Do not add outside
+      knowledge. Preserve exact entity wording, context, negation, speculation, and exact
+      supporting evidence. Co-occurrence alone is not a relation.
+    user_template: |-
+      Pass: {pass_name}
+      Return assertions for this complete paper using the response schema.
+
+      DOCUMENT:
+      {document}
+  molecular:
+    name: extraction_molecular
+    version: v1
+    system_prompt: >-
+      Extract supported molecular assertions from the supplied complete paper, focusing on
+      genes, proteins, pathways, metabolites, mechanisms, tissues, and cells. Use only the
+      paper, retain uncertainty and negation, and quote exact evidence.
+    user_template: |-
+      Pass: {pass_name}
+      Return molecular assertions using the response schema.
+
+      DOCUMENT:
+      {document}
+  clinical:
+    name: extraction_clinical
+    version: v1
+    system_prompt: >-
+      Extract supported clinical assertions from the supplied complete paper, focusing on
+      disease, treatment, population, outcomes, risks, dose, duration, and study context.
+      Use only the paper and quote exact evidence.
+    user_template: |-
+      Pass: {pass_name}
+      Return clinical assertions using the response schema.
+
+      DOCUMENT:
+      {document}
+

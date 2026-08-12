@@ -1,0 +1,39 @@
+version: v1
+relations:
+  - associated_with
+  - positively_associated_with
+  - negatively_associated_with
+  - correlated_with
+  - increases
+  - decreases
+  - increases_risk_of
+  - decreases_risk_of
+  - causes
+  - contributes_to
+  - prevents
+  - protects_against
+  - treats
+  - ameliorates
+  - worsens
+  - activates
+  - inhibits
+  - regulates
+  - upregulates
+  - downregulates
+  - interacts_with
+  - binds_to
+  - expressed_in
+  - located_in
+  - part_of
+  - includes
+  - biomarker_of
+  - predicts
+  - diagnoses
+  - produces
+  - metabolizes
+  - converts_to
+  - required_for
+  - promotes
+  - suppresses
+  - OTHER
+

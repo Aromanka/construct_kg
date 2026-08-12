@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "medical-kg"
+version = "0.1.0"
+description = "Evidence-aware biomedical literature knowledge graph pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "asyncpg>=0.29,<1",
+  "openai>=1.40,<2",
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.3,<3",
+  "PyYAML>=6.0,<7",
+  "SQLAlchemy[asyncio]>=2.0.31,<3",
+  "tenacity>=8.4,<10",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4.2,<6"]
+dev = [
+  "pytest>=8.2,<9",
+  "pytest-asyncio>=0.23,<1",
+  "ruff>=0.5,<1",
+]
+
+[project.scripts]
+medical-kg = "medical_kg.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/medical_kg"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+

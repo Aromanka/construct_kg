@@ -138,3 +138,7 @@ dmypy.json
 cython_debug/
 inspect_optimus_kg/output
 outputs
+
+# Local application configuration and generated run artifacts
+config.yaml
+.medical-kg/

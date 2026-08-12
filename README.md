@@ -1,37 +1,105 @@
-# construct_kg
+# Medical Literature Knowledge Graph
 
-#### 介绍
-construct kg with LLM from documents
+A maintainable, evidence-aware Python pipeline that converts local biomedical papers into a
+resumable PostgreSQL knowledge base. The current implementation deliberately focuses on the
+Phase I Bronze pipeline: reliable full-document extraction and faithful persistence of entity
+mentions, raw assertions, qualifiers, evidence, model output, and provenance.
 
-#### 软件架构
-软件架构说明
+## What is implemented
 
+- Stable document registration using relative paths (or a JSON-provided `document_id`) and
+  SHA-256 content hashes, with immutable revision snapshots for historical provenance.
+- Text, Markdown, JSON and optional PDF input.
+- Full-document `general`, `molecular`, and `clinical` extraction passes.
+- Versioned YAML prompts and configurable relation vocabulary.
+- OpenAI and OpenAI-compatible structured-output clients behind an `LLMClient` interface.
+- Pydantic validation, including controlled biomedical entity types, `OTHER` detail, extensible
+  qualifiers, and confidence bounds.
+- PostgreSQL persistence for all Landing, Bronze, Silver, and Gold objects described by the
+  architecture specification.
+- Transactional job claiming with `FOR UPDATE SKIP LOCKED`, independent failures, bounded
+  concurrency, request/token rate limiting, bounded retries, and resume/retry commands.
+- Exact source-evidence validation and deterministic mention offsets where possible.
+- Structured logs and run-level request/token/success statistics.
+- Conservative Silver/Gold extension points. Canonicalization is intentionally gated until the
+  Bronze output has been evaluated; it never overwrites Bronze data.
 
-#### 安装教程
+## Setup
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+Python 3.11+ and PostgreSQL are required.
 
-#### 使用说明
+```bash
+python -m venv .venv
+.venv/Scripts/activate
+pip install -e .
+copy config.example.yaml config.yaml
+```
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+Set `OPENAI_API_KEY` and `POSTGRES_PASSWORD`, or replace their environment placeholders in the
+local `config.yaml`. That file is ignored by Git. For PDFs, install `pip install -e ".[pdf]"`.
 
-#### 参与贡献
+Create the schema and seed the configured relation vocabulary:
 
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
+```bash
+medical-kg init-db
+```
 
+## Input
 
-#### 特技
+Plain text and Markdown files use their path relative to the ingested directory as the stable
+document ID. A JSON file can contain either a string or this object:
 
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+```json
+{
+  "document_id": "PMID:123456",
+  "title": "Example study",
+  "doi": "10.0000/example",
+  "pmid": "123456",
+  "content": "Complete paper text..."
+}
+```
+
+Changing the content under an existing `document_id` resets its processing jobs. Previous Bronze
+extraction records and their exact source revision remain available for provenance.
+
+## Commands
+
+```bash
+medical-kg ingest ./papers
+medical-kg extract
+medical-kg run ./papers
+medical-kg run --limit 100
+medical-kg extract --document-id PMID:123456
+medical-kg retry-failed
+medical-kg status
+medical-kg canonicalize
+```
+
+Every command accepts `--config PATH` where applicable. `run` optionally ingests a directory and
+then extracts pending work. A successful `(document_id, extraction pass, stage version)` is skipped
+on subsequent runs. Increase `extraction.stage_version` when extraction semantics change.
+
+## Architecture
+
+```text
+Local papers
+  -> documents + processing_jobs
+  -> full-document LLM passes
+  -> entity_mentions + raw_assertions + evidence + extraction_runs
+  -> [Phase II] entities + relation_types + canonical assertions
+  -> [Phase III] ontology enrichment and graph/export projections
+```
+
+PostgreSQL is authoritative. Prompt files live in `prompts/`, runtime configuration in
+`config.example.yaml`, and the canonical relation vocabulary in `config/relations.yaml`.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+ruff check .
+```
+
+The initial schema is applied idempotently by `medical-kg init-db`. Before changing a deployed
+schema, introduce versioned Alembic migrations under `src/medical_kg/db/migrations/`.

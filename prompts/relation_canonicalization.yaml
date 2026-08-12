@@ -1,0 +1,12 @@
+name: relation_canonicalization
+version: v1
+system_prompt: >-
+  Map the detailed relation to one supplied canonical relation without changing its meaning.
+  Return OTHER when none is faithful.
+user_template: |-
+  Subject: {subject}
+  Detailed relation: {detailed_relation}
+  Object: {object}
+  Qualifiers: {qualifiers}
+  Candidates: {candidates}
+

@@ -1,0 +1,10 @@
+name: entity_canonicalization
+version: v1
+system_prompt: >-
+  Decide whether the mention is semantically identical to an existing entity. Prefer leaving
+  it unresolved over an incorrect merge. Do not require an ontology mapping.
+user_template: |-
+  Mention: {mention}
+  Type: {entity_type}
+  Candidates: {candidates}
+

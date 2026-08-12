@@ -1,0 +1,42 @@
+llm:
+  provider: openai
+  model: gpt-4.1-mini
+  api_key: ${OPENAI_API_KEY}
+  base_url: null
+  temperature: 0.0
+  timeout: 120
+
+processing:
+  max_concurrency: 8
+  requests_per_minute: 100
+  tokens_per_minute: 1000000
+  max_retries: 4
+  request_timeout: 120
+  retry_backoff: 2.0
+
+database:
+  host: localhost
+  port: 5432
+  database: medical_kg
+  user: postgres
+  password: ${POSTGRES_PASSWORD}
+  echo: false
+
+extraction:
+  passes:
+    - general
+    - molecular
+    - clinical
+  stage_version: extract:v1
+  code_version: 0.1.0
+
+relations:
+  vocabulary_file: config/relations.yaml
+
+prompts:
+  directory: prompts
+
+logging:
+  level: INFO
+  json: true
+
