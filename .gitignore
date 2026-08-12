@@ -136,4 +136,4 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
-inspect_optimus_kg\output
+inspect_optimus_kg/output

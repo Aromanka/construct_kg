@@ -1,0 +1,5 @@
+当前我采用 @inspect_optimus_kg 中的脚本，试图提取出OptimusKG知识图谱中相关糖尿病的子图：https://github.com/mims-harvard/OptimusKG 。我已经将OptimusKG的文件下载并解压在了“E:\code\data\knowledge\med\OptimusKG”文件夹下。
+
+请你完善inspect_optimus下的脚本，以便提取出关于diabetes的子图。
+运行脚本采用 "E:\code\Env\envs\ml_env\python.exe" 解释器路径。
+同时，由于目前在本地电脑工作，请尽可能轻量化运行，例如最多一跳搜索，并且尽可能减少运算量，可以只进行demo提取。验证脚本无误后，我会在服务器上进行全量处理。
