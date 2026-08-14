@@ -29,4 +29,3 @@ def validate_assertion_candidate(
     if relation not in known_relations:
         issues.append(ValidationIssue("canonical_relation", "must exist in the vocabulary"))
     return issues
-

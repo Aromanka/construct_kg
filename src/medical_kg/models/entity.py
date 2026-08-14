@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from enum import StrEnum
-
 from pydantic import BaseModel, Field, model_validator
 
+from medical_kg.models.enums import StringEnum
 
-class EntityType(StrEnum):
+
+class EntityType(StringEnum):
     DISEASE = "DISEASE"
     PHENOTYPE = "PHENOTYPE"
     SYMPTOM = "SYMPTOM"
@@ -44,7 +44,7 @@ class EntityMentionOutput(BaseModel):
     entity_type_detail: str | None = None
 
     @model_validator(mode="after")
-    def require_other_detail(self) -> "EntityMentionOutput":
+    def require_other_detail(self) -> EntityMentionOutput:
         if self.entity_type == EntityType.OTHER and not self.entity_type_detail:
             raise ValueError("entity_type_detail is required when entity_type is OTHER")
         return self

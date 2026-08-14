@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from medical_kg.models.source import SourceType
+
 
 class DocumentInput(BaseModel):
     document_id: str = Field(min_length=1, max_length=255)
@@ -14,6 +16,7 @@ class DocumentInput(BaseModel):
     title: str | None = None
     doi: str | None = None
     pmid: str | None = None
+    source_type: SourceType = SourceType.RESEARCH
 
     @classmethod
     def from_content(
@@ -25,14 +28,15 @@ class DocumentInput(BaseModel):
         title: str | None = None,
         doi: str | None = None,
         pmid: str | None = None,
-    ) -> "DocumentInput":
+        source_type: SourceType = SourceType.RESEARCH,
+    ) -> DocumentInput:
         return cls(
             document_id=document_id,
             file_path=file_path,
             title=title,
             doi=doi,
             pmid=pmid,
+            source_type=source_type,
             content=content,
             content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         )
-

@@ -55,4 +55,3 @@ class ExtractionOutput(BaseModel):
 
     def as_json_value(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
-

@@ -1,8 +1,8 @@
 llm:
-  provider: openai
-  model: gpt-4.1-mini
-  api_key: ${OPENAI_API_KEY}
-  base_url: null
+  provider: deepseek
+  model: deepseek-v4-pro
+  api_key: ${DEEPSEEK_API_KEY}
+  base_url: https://api.deepseek.com
   temperature: 0.0
   timeout: 120
 
@@ -39,4 +39,3 @@ prompts:
 logging:
   level: INFO
   json: true
-

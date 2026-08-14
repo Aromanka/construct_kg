@@ -5,6 +5,7 @@ from pathlib import Path
 from medical_kg.bronze.extraction import BronzeExtractor, RunStatistics
 from medical_kg.db.repository import KnowledgeRepository
 from medical_kg.landing.loader import DocumentLoader, IngestResult
+from medical_kg.models.source import SourceType
 from medical_kg.pipeline.worker import default_worker_id
 
 
@@ -20,8 +21,10 @@ class PipelineRunner:
         self.loader = loader
         self.extractor = extractor
 
-    async def ingest(self, source: Path) -> IngestResult:
-        return await self.loader.ingest(source)
+    async def ingest(
+        self, source: Path, *, source_type: SourceType = SourceType.RESEARCH
+    ) -> IngestResult:
+        return await self.loader.ingest(source, source_type=source_type)
 
     async def extract(
         self,
@@ -29,7 +32,11 @@ class PipelineRunner:
         limit: int | None = None,
         document_id: str | None = None,
         worker_id: str | None = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int = 0,
     ) -> RunStatistics:
+        # Fail invalid chunk settings before touching job state in PostgreSQL.
+        self.extractor.stage_version(chunk_size, chunk_overlap)
         # Twice the worst configured provider window avoids stealing legitimate long retries while
         # ensuring a worker crash does not leave work permanently stuck in RUNNING.
         stale_after = 2 * (
@@ -39,13 +46,16 @@ class PipelineRunner:
         )
         await self.repository.recover_stale_jobs(older_than_seconds=stale_after)
         document_ids = (
-            [document_id]
-            if document_id
-            else await self.repository.list_document_ids(limit)
+            [document_id] if document_id else await self.repository.list_document_ids(limit)
         )
-        await self.extractor.enqueue(document_ids)
+        await self.extractor.enqueue(
+            document_ids, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        )
         return await self.extractor.run(
-            worker_id=worker_id or default_worker_id(), document_id=document_id
+            worker_id=worker_id or default_worker_id(),
+            document_id=document_id,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
         )
 
     async def run(
@@ -55,9 +65,16 @@ class PipelineRunner:
         limit: int | None = None,
         document_id: str | None = None,
         worker_id: str | None = None,
+        source_type: SourceType = SourceType.RESEARCH,
+        chunk_size: int | None = None,
+        chunk_overlap: int = 0,
     ) -> tuple[IngestResult | None, RunStatistics]:
-        ingest_result = await self.ingest(source) if source else None
+        ingest_result = await self.ingest(source, source_type=source_type) if source else None
         extract_result = await self.extract(
-            limit=limit, document_id=document_id, worker_id=worker_id
+            limit=limit,
+            document_id=document_id,
+            worker_id=worker_id,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
         )
         return ingest_result, extract_result

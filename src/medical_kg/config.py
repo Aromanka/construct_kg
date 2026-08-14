@@ -8,12 +8,11 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
-
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?}")
 
 
 class LLMSettings(BaseModel):
-    provider: str = "openai"
+    provider: str = "compatible"
     model: str
     api_key: SecretStr
     base_url: str | None = None
@@ -53,7 +52,7 @@ class ExtractionSettings(BaseModel):
     code_version: str = "unknown"
 
     @model_validator(mode="after")
-    def unique_passes(self) -> "ExtractionSettings":
+    def unique_passes(self) -> ExtractionSettings:
         if not self.passes or len(self.passes) != len(set(self.passes)):
             raise ValueError("extraction.passes must be a non-empty list of unique names")
         return self
@@ -69,7 +68,7 @@ class PromptSettings(BaseModel):
 
 class LoggingSettings(BaseModel):
     level: str = "INFO"
-    json: bool = True
+    json_output: bool = Field(default=True, validation_alias="json")
 
 
 class AppSettings(BaseModel):
@@ -83,7 +82,7 @@ class AppSettings(BaseModel):
     project_root: Path = Field(exclude=True)
 
     @model_validator(mode="after")
-    def resolve_paths(self) -> "AppSettings":
+    def resolve_paths(self) -> AppSettings:
         if not self.relations.vocabulary_file.is_absolute():
             self.relations.vocabulary_file = self.project_root / self.relations.vocabulary_file
         if not self.prompts.directory.is_absolute():

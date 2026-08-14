@@ -10,4 +10,3 @@ __all__ = [
     "ExtractionOutput",
     "Qualifiers",
 ]
-

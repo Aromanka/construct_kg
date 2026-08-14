@@ -21,7 +21,7 @@ class LLMClient(ABC):
     async def extract_document(
         self, *, system_prompt: str, user_prompt: str, temperature: float
     ) -> LLMResponse:
-        """Extract validated assertions from a complete document."""
+        """Extract validated assertions from the supplied document text or text chunk."""
 
     async def canonicalize_entity(self, **_: Any) -> Any:
         raise NotImplementedError("Entity canonicalization is a Phase II extension")
@@ -29,3 +29,6 @@ class LLMClient(ABC):
     async def canonicalize_relation(self, **_: Any) -> Any:
         raise NotImplementedError("Relation canonicalization is a Phase II extension")
 
+    async def aclose(self) -> None:
+        """Release provider resources when the client owns network connections."""
+        return None

@@ -2,4 +2,3 @@
 
 Bronze records are intentionally never mutated by modules in this package.
 """
-

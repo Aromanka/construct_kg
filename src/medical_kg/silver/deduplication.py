@@ -24,4 +24,3 @@ def normalized_assertion_identity(
     }
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-

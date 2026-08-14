@@ -1,0 +1,9 @@
+# Runtime dependencies
+asyncpg>=0.29,<1
+httpx>=0.27,<1
+pydantic>=2.7,<3
+PyYAML>=6.0,<7
+SQLAlchemy>=2.0.31,<3
+
+# Optional PDF and development dependencies are intentionally excluded.
+# Install them only when needed with: pip install -e ".[pdf]" or ".[dev]"

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from medical_kg.config import AppSettings
 from medical_kg.db.repository import ClaimedJob, ExtractionRunSpec, KnowledgeRepository
+from medical_kg.landing.chunking import DocumentChunk, chunk_document
 from medical_kg.llm.base import LLMClient, LLMResponse
+from medical_kg.models.assertion import AssertionOutput, ExtractionOutput
 from medical_kg.prompts import PromptRegistry
-
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class RunStatistics:
     output_tokens: int = 0
     estimated_cost: float | None = None
 
-    def add(self, other: "RunStatistics") -> None:
+    def add(self, other: RunStatistics) -> None:
         self.documents_processed += other.documents_processed
         self.documents_successful += other.documents_successful
         self.documents_failed += other.documents_failed
@@ -85,18 +86,51 @@ class BronzeExtractor:
     def job_stages(self) -> list[str]:
         return [f"extract:{pass_name}" for pass_name in self.settings.extraction.passes]
 
-    async def enqueue(self, document_ids: list[str]) -> int:
+    def stage_version(self, chunk_size: int | None, chunk_overlap: int) -> str:
+        # Validate the options before jobs are enqueued. A chunked run is a distinct resumable
+        # processing unit from a full-document run.
+        chunk_document("", chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        if chunk_size is None:
+            return self.settings.extraction.stage_version
+        version = (
+            f"{self.settings.extraction.stage_version}|chunk={chunk_size},overlap={chunk_overlap}"
+        )
+        if len(version) > 128:
+            raise ValueError("effective extraction stage version exceeds 128 characters")
+        return version
+
+    async def enqueue(
+        self,
+        document_ids: list[str],
+        *,
+        chunk_size: int | None = None,
+        chunk_overlap: int = 0,
+    ) -> int:
         return await self.repository.enqueue_jobs(
             document_ids=document_ids,
             stages=self.job_stages,
-            stage_version=self.settings.extraction.stage_version,
+            stage_version=self.stage_version(chunk_size, chunk_overlap),
         )
 
     async def run(
-        self, *, worker_id: str, document_id: str | None = None
+        self,
+        *,
+        worker_id: str,
+        document_id: str | None = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int = 0,
     ) -> RunStatistics:
+        stage_version = self.stage_version(chunk_size, chunk_overlap)
         workers = [
-            asyncio.create_task(self._worker(f"{worker_id}-{index}", document_id))
+            asyncio.create_task(
+                self._worker(
+                    f"{worker_id}-{index}",
+                    document_id,
+                    stage_version,
+                    chunk_size,
+                    chunk_overlap,
+                )
+            )
             for index in range(self.settings.processing.max_concurrency)
         ]
         results = await asyncio.gather(*workers)
@@ -105,33 +139,72 @@ class BronzeExtractor:
             total.add(result)
         return total
 
-    async def _worker(self, worker_id: str, document_id: str | None) -> RunStatistics:
+    async def _worker(
+        self,
+        worker_id: str,
+        document_id: str | None,
+        stage_version: str,
+        chunk_size: int | None,
+        chunk_overlap: int,
+    ) -> RunStatistics:
         statistics = RunStatistics()
         while True:
             job = await self.repository.claim_job(
                 stages=self.job_stages,
-                stage_version=self.settings.extraction.stage_version,
+                stage_version=stage_version,
                 worker_id=worker_id,
                 document_id=document_id,
             )
             if job is None:
                 return statistics
-            outcome = await self._process(job)
+            outcome = await self._process(job, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
             statistics.add(outcome)
 
-    async def _process(self, job: ClaimedJob) -> RunStatistics:
+    async def _process(
+        self,
+        job: ClaimedJob,
+        *,
+        chunk_size: int | None = None,
+        chunk_overlap: int = 0,
+    ) -> RunStatistics:
         statistics = RunStatistics(documents_processed=1)
         pass_name = job.stage.split(":", 1)[1]
         prompt = self.prompts.extraction(pass_name)
         started = time.monotonic()
         try:
-            response = await self._request(
-                job,
-                pass_name,
-                prompt.system_prompt,
-                prompt.render(pass_name=pass_name, document=job.content),
-                statistics,
+            chunks = chunk_document(job.content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            responses: list[tuple[DocumentChunk, LLMResponse]] = []
+            for chunk in chunks:
+                response = await self._request(
+                    chunk.content,
+                    prompt.system_prompt,
+                    prompt.render(pass_name=pass_name, document=chunk.content),
+                    statistics,
+                )
+                responses.append((chunk, response))
+
+            output = ExtractionOutput(
+                assertions=self._unique_assertions(
+                    assertion
+                    for _, response in responses
+                    for assertion in response.output.assertions
+                )
             )
+            if chunk_size is None:
+                raw_output = responses[0][1].raw_output
+            else:
+                raw_output = {
+                    "chunking": {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+                    "chunks": [
+                        {
+                            "index": chunk.index,
+                            "character_start": chunk.character_start,
+                            "character_end": chunk.character_end,
+                            "raw_output": response.raw_output,
+                        }
+                        for chunk, response in responses
+                    ],
+                }
             run_id = await self.repository.complete_extraction(
                 job=job,
                 run_spec=ExtractionRunSpec(
@@ -143,12 +216,12 @@ class BronzeExtractor:
                     temperature=self.settings.llm.temperature,
                     code_version=self.settings.extraction.code_version,
                 ),
-                output=response.output,
-                raw_output=response.raw_output,
+                output=output,
+                raw_output=raw_output,
             )
             statistics.documents_successful = 1
-            statistics.input_tokens += response.input_tokens
-            statistics.output_tokens += response.output_tokens
+            statistics.input_tokens += sum(response.input_tokens for _, response in responses)
+            statistics.output_tokens += sum(response.output_tokens for _, response in responses)
             logger.info(
                 "extraction succeeded",
                 extra={
@@ -157,8 +230,9 @@ class BronzeExtractor:
                     "extraction_run_id": run_id,
                     "model": self.settings.llm.model,
                     "elapsed_time": time.monotonic() - started,
-                    "input_tokens": response.input_tokens,
-                    "output_tokens": response.output_tokens,
+                    "input_tokens": statistics.input_tokens,
+                    "output_tokens": statistics.output_tokens,
+                    "chunks": len(chunks),
                     "status": "SUCCESS",
                 },
             )
@@ -180,21 +254,15 @@ class BronzeExtractor:
 
     async def _request(
         self,
-        job: ClaimedJob,
-        pass_name: str,
+        content: str,
         system_prompt: str,
         user_prompt: str,
         statistics: RunStatistics,
     ) -> LLMResponse:
-        estimated_tokens = max(1, len(job.content) // 4)
+        estimated_tokens = max(1, len(content) // 4)
         attempts = self.settings.processing.max_retries + 1
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(attempts),
-            wait=wait_exponential(multiplier=self.settings.processing.retry_backoff, max=60),
-            retry=retry_if_exception_type(Exception),
-            reraise=True,
-        ):
-            with attempt:
+        for attempt_index in range(attempts):
+            try:
                 statistics.requests += 1
                 await self.limiter.acquire(estimated_tokens)
                 return await asyncio.wait_for(
@@ -205,4 +273,25 @@ class BronzeExtractor:
                     ),
                     timeout=self.settings.processing.request_timeout,
                 )
-        raise RuntimeError(f"Extraction retry loop ended unexpectedly for {pass_name}")
+            except Exception:
+                if attempt_index + 1 >= attempts:
+                    raise
+                delay = min(self.settings.processing.retry_backoff * (2**attempt_index), 60)
+                await asyncio.sleep(delay)
+        raise RuntimeError("Extraction retry loop ended unexpectedly")
+
+    @staticmethod
+    def _unique_assertions(assertions: Iterable[AssertionOutput]) -> list[AssertionOutput]:
+        unique: list[AssertionOutput] = []
+        seen: set[str] = set()
+        for assertion in assertions:
+            identity = json.dumps(
+                assertion.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if identity not in seen:
+                seen.add(identity)
+                unique.append(assertion)
+        return unique

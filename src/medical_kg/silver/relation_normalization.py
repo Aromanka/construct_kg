@@ -20,4 +20,3 @@ class ExactRelationNormalizer:
         if candidate in self.vocabulary:
             return RelationMapping(candidate, 1.0)
         return RelationMapping("OTHER", 0.0)
-

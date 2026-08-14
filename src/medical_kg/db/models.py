@@ -46,7 +46,14 @@ class Document(Base, UpdatedTimestampMixin):
     pmid: Mapped[str | None] = mapped_column(String(64))
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="research", server_default="research"
+    )
     __table_args__ = (
+        CheckConstraint(
+            "source_type IN ('textbook', 'guidelines', 'research')",
+            name="ck_document_source_type",
+        ),
         Index("ix_documents_content_hash", "content_hash"),
         Index("ix_documents_doi", "doi"),
         Index("ix_documents_pmid", "pmid"),
@@ -66,6 +73,9 @@ class DocumentRevision(Base, TimestampMixin):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="research", server_default="research"
+    )
     __table_args__ = (
         UniqueConstraint("document_id", "content_hash", name="uq_document_revision"),
         Index("ix_document_revisions_hash", "content_hash"),
@@ -88,6 +98,7 @@ class ExtractionRun(Base, TimestampMixin):
     pass_name: Mapped[str] = mapped_column(String(128), nullable=False)
     temperature: Mapped[float] = mapped_column(Float, nullable=False)
     code_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
 class ProcessingJob(Base):
@@ -107,9 +118,7 @@ class ProcessingJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (
-        UniqueConstraint(
-            "document_id", "stage", "stage_version", name="uq_processing_unit"
-        ),
+        UniqueConstraint("document_id", "stage", "stage_version", name="uq_processing_unit"),
         CheckConstraint(
             "status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED')", name="ck_job_status"
         ),
@@ -137,7 +146,11 @@ class EntityMention(Base, TimestampMixin):
     character_start: Mapped[int | None] = mapped_column(Integer)
     character_end: Mapped[int | None] = mapped_column(Integer)
     page: Mapped[int | None] = mapped_column(Integer)
-    __table_args__ = (Index("ix_mentions_document", "document_id"),)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_mention_sources_array"),
+        Index("ix_mentions_document", "document_id"),
+    )
 
 
 class Entity(Base, UpdatedTimestampMixin):
@@ -146,6 +159,10 @@ class Entity(Base, UpdatedTimestampMixin):
     canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_entity_sources_array"),
+    )
 
 
 class EntityAlias(Base, TimestampMixin):
@@ -222,8 +239,10 @@ class RawAssertion(Base, TimestampMixin):
     raw_llm_output: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     evidence_validated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     validation_error: Mapped[str | None] = mapped_column(Text)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     __table_args__ = (
         CheckConstraint("llm_confidence >= 0 AND llm_confidence <= 1", name="ck_llm_confidence"),
+        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_raw_assertion_sources_array"),
         Index("ix_raw_assertions_document", "document_id"),
     )
 
@@ -252,9 +271,7 @@ class Assertion(Base, UpdatedTimestampMixin):
     raw_assertion_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("raw_assertions.raw_assertion_id"), nullable=False, unique=True
     )
-    subject_entity_id: Mapped[str] = mapped_column(
-        ForeignKey("entities.entity_id"), nullable=False
-    )
+    subject_entity_id: Mapped[str] = mapped_column(ForeignKey("entities.entity_id"), nullable=False)
     object_entity_id: Mapped[str] = mapped_column(ForeignKey("entities.entity_id"), nullable=False)
     canonical_relation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("relation_types.relation_id"), nullable=False
@@ -263,6 +280,10 @@ class Assertion(Base, UpdatedTimestampMixin):
     negated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     speculative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     normalized_identity: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_assertion_sources_array"),
+    )
 
 
 class InvalidRecord(Base, TimestampMixin):

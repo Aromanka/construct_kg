@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from medical_kg.db.repository import KnowledgeRepository
 from medical_kg.models.document import DocumentInput
-
+from medical_kg.models.source import SourceType
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,18 @@ class DocumentLoader:
     def __init__(self, repository: KnowledgeRepository) -> None:
         self.repository = repository
 
-    async def ingest(self, source: Path) -> IngestResult:
+    async def ingest(
+        self, source: Path, *, source_type: SourceType = SourceType.RESEARCH
+    ) -> IngestResult:
         result = IngestResult()
         for path in self._discover(source):
             result.discovered += 1
             try:
-                document = self.load_file(path, source if source.is_dir() else source.parent)
+                document = self.load_file(
+                    path,
+                    source if source.is_dir() else source.parent,
+                    default_source_type=source_type,
+                )
                 created, changed = await self.repository.register_document(document)
                 if created:
                     result.created += 1
@@ -63,7 +70,13 @@ class DocumentLoader:
             if path.is_file() and path.suffix.lower() in self.supported_suffixes:
                 yield path.resolve()
 
-    def load_file(self, path: Path, root: Path) -> DocumentInput:
+    def load_file(
+        self,
+        path: Path,
+        root: Path,
+        *,
+        default_source_type: SourceType = SourceType.RESEARCH,
+    ) -> DocumentInput:
         suffix = path.suffix.lower()
         metadata: dict[str, Any] = {}
         if suffix == ".json":
@@ -90,6 +103,7 @@ class DocumentLoader:
             title=metadata.get("title") or path.stem,
             doi=metadata.get("doi"),
             pmid=str(metadata["pmid"]) if metadata.get("pmid") is not None else None,
+            source_type=metadata.get("source_type", default_source_type),
         )
 
     @staticmethod

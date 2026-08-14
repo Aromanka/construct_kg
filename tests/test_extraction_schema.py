@@ -60,4 +60,3 @@ def test_other_requires_detail() -> None:
                 ]
             }
         )
-

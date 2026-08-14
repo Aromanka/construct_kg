@@ -18,4 +18,3 @@ def test_ambiguous_alias_is_not_merged() -> None:
         EntityCandidate("ENT_00000002", "ABC", "GENE"),
     ]
     assert resolver.resolve("ABC", "GENE", candidates) is None
-

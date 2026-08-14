@@ -30,4 +30,3 @@ async def test_changed_document_is_reported(tmp_path: Path) -> None:
     result = await DocumentLoader(repository).ingest(source)
 
     assert result.changed == 1
-

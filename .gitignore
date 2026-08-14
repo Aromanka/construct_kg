@@ -142,3 +142,6 @@ outputs
 # Local application configuration and generated run artifacts
 config.yaml
 .medical-kg/
+data/knowledge_base
+src/medical_kg/db/migrations
+

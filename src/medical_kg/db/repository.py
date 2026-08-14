@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Any, Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -22,6 +23,7 @@ from medical_kg.db.models import (
 from medical_kg.models.assertion import ExtractionOutput
 from medical_kg.models.document import DocumentInput
 from medical_kg.models.job import JobStatus
+from medical_kg.models.source import KnowledgeSource
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class ClaimedJob:
     retry_count: int
     content: str
     content_hash: str
+    source_type: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,25 @@ class KnowledgeRepository:
     async def create_schema(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            # create_all is intentionally idempotent but does not add columns to an existing
+            # deployment. Keep these additive upgrades idempotent as well.
+            for statement in (
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS "
+                "source_type VARCHAR(32) NOT NULL DEFAULT 'research'",
+                "ALTER TABLE document_revisions ADD COLUMN IF NOT EXISTS "
+                "source_type VARCHAR(32) NOT NULL DEFAULT 'research'",
+                "ALTER TABLE extraction_runs ADD COLUMN IF NOT EXISTS "
+                "source_type VARCHAR(32) NOT NULL DEFAULT 'research'",
+                "ALTER TABLE entity_mentions ADD COLUMN IF NOT EXISTS "
+                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
+                "ALTER TABLE entities ADD COLUMN IF NOT EXISTS "
+                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
+                "ALTER TABLE raw_assertions ADD COLUMN IF NOT EXISTS "
+                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
+                "ALTER TABLE assertions ADD COLUMN IF NOT EXISTS "
+                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
+            ):
+                await connection.execute(text(statement))
 
     async def register_document(self, document: DocumentInput) -> tuple[bool, bool]:
         """Return ``(created, changed)`` and invalidate jobs if the content changed."""
@@ -71,6 +93,7 @@ class KnowledgeRepository:
                         pmid=document.pmid,
                         content=document.content,
                         content_hash=document.content_hash,
+                        source_type=document.source_type.value,
                     )
                 )
                 session.add(
@@ -79,16 +102,20 @@ class KnowledgeRepository:
                         content_hash=document.content_hash,
                         content=document.content,
                         file_path=str(document.file_path),
+                        source_type=document.source_type.value,
                     )
                 )
                 return True, True
 
-            changed = current.content_hash != document.content_hash
+            content_changed = current.content_hash != document.content_hash
+            source_type_changed = current.source_type != document.source_type.value
+            changed = content_changed or source_type_changed
             current.file_path = str(document.file_path)
             current.title = document.title or current.title
             current.doi = document.doi or current.doi
             current.pmid = document.pmid or current.pmid
-            if changed:
+            current.source_type = document.source_type.value
+            if content_changed:
                 current.content = document.content
                 current.content_hash = document.content_hash
                 session.add(
@@ -97,8 +124,10 @@ class KnowledgeRepository:
                         content_hash=document.content_hash,
                         content=document.content,
                         file_path=str(document.file_path),
+                        source_type=document.source_type.value,
                     )
                 )
+            if changed:
                 # Bronze history remains intact. Jobs are removed so current content gets new runs.
                 await session.execute(
                     delete(ProcessingJob).where(ProcessingJob.document_id == document.document_id)
@@ -170,7 +199,7 @@ class KnowledgeRepository:
                 raise RuntimeError(f"Job {job.job_id} refers to missing document {job.document_id}")
             job.status = JobStatus.RUNNING.value
             job.worker_id = worker_id
-            job.started_at = datetime.now(UTC)
+            job.started_at = datetime.now(timezone.utc)
             job.finished_at = None
             job.error_message = None
             return ClaimedJob(
@@ -181,6 +210,7 @@ class KnowledgeRepository:
                 retry_count=job.retry_count,
                 content=document.content,
                 content_hash=document.content_hash,
+                source_type=document.source_type,
             )
 
     async def complete_extraction(
@@ -200,10 +230,15 @@ class KnowledgeRepository:
                 **run_spec.__dict__,
                 document_id=job.document_id,
                 content_hash=job.content_hash,
+                source_type=job.source_type,
             )
             session.add(run)
             await session.flush()
 
+            source = KnowledgeSource(
+                document_id=job.document_id, source_type=job.source_type
+            ).model_dump(mode="json")
+            sources = [source]
             for assertion in output.assertions:
                 evidence_start = job.content.find(assertion.evidence_text)
                 evidence_valid = evidence_start >= 0
@@ -221,6 +256,7 @@ class KnowledgeRepository:
                     entity_type_detail=assertion.subject.entity_type_detail,
                     character_start=subject_start,
                     character_end=subject_end,
+                    sources=sources,
                 )
                 object_ = EntityMention(
                     document_id=job.document_id,
@@ -230,6 +266,7 @@ class KnowledgeRepository:
                     entity_type_detail=assertion.object.entity_type_detail,
                     character_start=object_start,
                     character_end=object_end,
+                    sources=sources,
                 )
                 session.add_all([subject, object_])
                 await session.flush()
@@ -254,11 +291,12 @@ class KnowledgeRepository:
                         validation_error=(
                             None if evidence_valid else "Evidence is not exact source text"
                         ),
+                        sources=sources,
                     )
                 )
 
             locked_job.status = JobStatus.SUCCESS.value
-            locked_job.finished_at = datetime.now(UTC)
+            locked_job.finished_at = datetime.now(timezone.utc)
             locked_job.error_message = None
             return run.extraction_run_id
 
@@ -281,7 +319,7 @@ class KnowledgeRepository:
                 return
             job.status = JobStatus.FAILED.value
             job.retry_count += 1
-            job.finished_at = datetime.now(UTC)
+            job.finished_at = datetime.now(timezone.utc)
             job.error_message = error[:20_000]
 
     async def retry_failed(
@@ -308,7 +346,7 @@ class KnowledgeRepository:
 
     async def recover_stale_jobs(self, *, older_than_seconds: float) -> int:
         """Return abandoned RUNNING jobs to PENDING without disturbing active workers."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)
         statement = (
             update(ProcessingJob)
             .where(
