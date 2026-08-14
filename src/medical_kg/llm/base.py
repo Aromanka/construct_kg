@@ -17,6 +17,8 @@ class LLMResponse:
 
 
 class LLMClient(ABC):
+    max_request_count = 1
+
     @abstractmethod
     async def extract_document(
         self, *, system_prompt: str, user_prompt: str, temperature: float

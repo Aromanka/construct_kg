@@ -31,7 +31,7 @@ extraction:
     - general
     - molecular
     - clinical
-  stage_version: extract:v1
+  stage_version: extract:v2
   code_version: 0.1.0
 
 relations:

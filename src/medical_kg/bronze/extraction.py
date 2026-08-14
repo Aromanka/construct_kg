@@ -165,11 +165,13 @@ class BronzeExtractor:
         # Validate the options before jobs are enqueued. A chunked run is a distinct resumable
         # processing unit from a full-document run.
         chunk_document("", chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        if chunk_size is None:
-            return self.settings.extraction.stage_version
-        version = (
-            f"{self.settings.extraction.stage_version}|chunk={chunk_size},overlap={chunk_overlap}"
+        prompt_versions = ",".join(
+            f"{pass_name}:{self.prompts.extraction(pass_name).version}"
+            for pass_name in sorted(self.settings.extraction.passes)
         )
+        version = f"{self.settings.extraction.stage_version}|prompts={prompt_versions}"
+        if chunk_size is not None:
+            version += f"|chunk={chunk_size},overlap={chunk_overlap}"
         if len(version) > 128:
             raise ValueError("effective extraction stage version exceeds 128 characters")
         return version
@@ -496,13 +498,26 @@ class BronzeExtractor:
                         user_prompt=user_prompt,
                         temperature=self.settings.llm.temperature,
                     ),
-                    timeout=self.settings.processing.request_timeout,
+                    timeout=(
+                        self.settings.processing.request_timeout
+                        * max(1, int(getattr(type(self.llm), "max_request_count", 1)))
+                    ),
+                )
+                statistics.requests += max(
+                    0, int(response.metadata.get("request_count", 1)) - 1
                 )
                 await self._reconcile_tokens(
                     estimated_tokens, response.input_tokens + response.output_tokens
                 )
                 return response
             except Exception as error:
+                request_count = int(getattr(error, "request_count", 1))
+                statistics.requests += max(0, request_count - 1)
+                actual_tokens = int(getattr(error, "input_tokens", 0)) + int(
+                    getattr(error, "output_tokens", 0)
+                )
+                if actual_tokens > 0:
+                    await self._reconcile_tokens(estimated_tokens, actual_tokens)
                 if attempt_index + 1 >= attempts or not self._is_retryable(error):
                     raise
                 retry_after = self._retry_after(error)

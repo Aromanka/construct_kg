@@ -1,11 +1,14 @@
 prompts:
   general:
     name: extraction_general
-    version: v1
+    version: v2
     system_prompt: >-
       Extract biomedical assertions supported by the supplied paper. Do not add outside
       knowledge. Preserve exact entity wording, context, negation, speculation, and exact
-      supporting evidence. Co-occurrence alone is not a relation.
+      supporting evidence. Co-occurrence alone is not a relation. Follow the response schema
+      exactly. Prefer a listed specific entity type over OTHER; when OTHER is necessary, always
+      provide a non-empty entity_type_detail describing the precise semantic category. Always
+      return qualifiers as a JSON object; use {} when none apply and never return null.
     user_template: |-
       Pass: {pass_name}
       Return assertions for the supplied document text using the response schema.
@@ -14,11 +17,14 @@ prompts:
       {document}
   molecular:
     name: extraction_molecular
-    version: v1
+    version: v2
     system_prompt: >-
       Extract supported molecular assertions from the supplied document text, focusing on
       genes, proteins, pathways, metabolites, mechanisms, tissues, and cells. Use only the
-      paper, retain uncertainty and negation, and quote exact evidence.
+      paper, retain uncertainty and negation, and quote exact evidence. Follow the response schema
+      exactly. Prefer a listed specific entity type over OTHER; when OTHER is necessary, always
+      provide a non-empty entity_type_detail describing the precise semantic category. Always
+      return qualifiers as a JSON object; use {} when none apply and never return null.
     user_template: |-
       Pass: {pass_name}
       Return molecular assertions from the supplied document text using the response schema.
@@ -27,11 +33,14 @@ prompts:
       {document}
   clinical:
     name: extraction_clinical
-    version: v1
+    version: v2
     system_prompt: >-
       Extract supported clinical assertions from the supplied document text, focusing on
       disease, treatment, population, outcomes, risks, dose, duration, and study context.
-      Use only the paper and quote exact evidence.
+      Use only the paper and quote exact evidence. Follow the response schema exactly. Prefer a
+      listed specific entity type over OTHER; when OTHER is necessary, always provide a non-empty
+      entity_type_detail describing the precise semantic category. Always return qualifiers as a
+      JSON object; use {} when none apply and never return null.
     user_template: |-
       Pass: {pass_name}
       Return clinical assertions from the supplied document text using the response schema.

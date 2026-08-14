@@ -22,7 +22,7 @@ from medical_kg.landing.loader import DocumentLoader
 from medical_kg.llm.base import LLMResponse
 from medical_kg.models.assertion import ExtractionOutput
 from medical_kg.models.source import SourceType, merge_sources
-from medical_kg.prompts import PromptDefinition
+from medical_kg.prompts import PromptDefinition, PromptRegistry
 
 
 def test_source_lists_are_declared_on_graph_and_bronze_records() -> None:
@@ -337,7 +337,60 @@ async def test_single_chunked_job_can_reach_one_hundred_api_requests_in_flight()
 
 def test_chunk_settings_are_part_of_resumable_stage_version() -> None:
     extractor = object.__new__(BronzeExtractor)
-    extractor.settings = SimpleNamespace(extraction=SimpleNamespace(stage_version="extract:v1"))
+    extractor.settings = SimpleNamespace(
+        extraction=SimpleNamespace(stage_version="extract:v1", passes=["general"])
+    )
+    extractor.prompts = SimpleNamespace(
+        extraction=Mock(return_value=SimpleNamespace(version="v2"))
+    )
 
-    assert extractor.stage_version(None, 0) == "extract:v1"
-    assert extractor.stage_version(5000, 200) == "extract:v1|chunk=5000,overlap=200"
+    assert extractor.stage_version(None, 0) == "extract:v1|prompts=general:v2"
+    assert (
+        extractor.stage_version(5000, 200)
+        == "extract:v1|prompts=general:v2|chunk=5000,overlap=200"
+    )
+
+
+def test_v2_extraction_prompts_state_strict_output_rules() -> None:
+    registry = PromptRegistry(Path(__file__).parents[1] / "prompts")
+
+    for pass_name in ("general", "molecular", "clinical"):
+        prompt = registry.extraction(pass_name)
+        assert prompt.version == "v2"
+        assert "entity_type_detail" in prompt.system_prompt
+        assert "never return null" in prompt.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_internal_correction_request_is_included_in_run_statistics() -> None:
+    settings = SimpleNamespace(
+        processing=SimpleNamespace(
+            requests_per_minute=100_000,
+            tokens_per_minute=100_000_000,
+            reserved_output_tokens=0,
+            distributed_rate_limit=False,
+            max_retries=0,
+            retry_backoff=0,
+            request_timeout=10,
+        ),
+        llm=SimpleNamespace(temperature=0.0),
+    )
+    llm = AsyncMock()
+    llm.extract_document.return_value = LLMResponse(
+        output=ExtractionOutput(),
+        raw_output={},
+        input_tokens=20,
+        output_tokens=5,
+        metadata={"request_count": 2},
+    )
+    extractor = BronzeExtractor(
+        settings=settings,
+        repository=AsyncMock(),
+        llm=llm,
+        prompts=AsyncMock(),
+    )
+    statistics = SimpleNamespace(requests=0)
+
+    await extractor._request("text", "system", "user", statistics)
+
+    assert statistics.requests == 2

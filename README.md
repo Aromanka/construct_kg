@@ -19,6 +19,8 @@ mentions, raw assertions, qualifiers, evidence, model output, and provenance.
   interface; the OpenAI SDK is not required.
 - Pydantic validation, including controlled biomedical entity types, `OTHER` detail, extensible
   qualifiers, and confidence bounds.
+- Semantics-preserving normalization for nullable empty qualifiers and one guided provider
+  correction request for otherwise invalid structured output; strict validation still gates writes.
 - SQLite persistence for all Landing, Bronze, Silver, and Gold objects described by the
   architecture specification.
 - Atomic job claiming with process-local asynchronous write serialization and SQLite immediate
@@ -132,8 +134,9 @@ then extracts pending work. `--source-type` sets the default for ingested files;
 override it per document. `extract` and `run` use the complete document unless `--chunk-size` is
 provided; `--chunk-overlap` must be smaller than the chunk size. A successful `(document_id,
 extraction pass, effective stage version)` is skipped on subsequent runs. Chunk settings are part
-of that effective version. Increase `extraction.stage_version` when other extraction semantics
-change.
+of that effective version. Prompt versions are also included automatically, so prompt changes do
+not reuse incompatible checkpoints. Increase `extraction.stage_version` when other extraction
+semantics change.
 
 ### Parallel extraction
 
