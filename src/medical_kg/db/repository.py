@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from medical_kg.db.models import (
     APIRateLimit,
@@ -62,43 +63,33 @@ class ExtractionRunSpec:
 
 
 class KnowledgeRepository:
-    """Transactional access to the authoritative PostgreSQL knowledge store."""
+    """Transactional access to the authoritative SQLite knowledge store."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
         self.sessions = async_sessionmaker(engine, expire_on_commit=False)
 
+    @asynccontextmanager
+    async def _write_session(self) -> AsyncIterator[AsyncSession]:
+        """Serialize SQLite writers and make read-modify-write operations atomic."""
+        async with self.sessions() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                yield session
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
     async def create_schema(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            # create_all is intentionally idempotent but does not add columns to an existing
-            # deployment. Keep these additive upgrades idempotent as well.
-            for statement in (
-                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS "
-                "source_type VARCHAR(32) NOT NULL DEFAULT 'research'",
-                "ALTER TABLE document_revisions ADD COLUMN IF NOT EXISTS "
-                "source_type VARCHAR(32) NOT NULL DEFAULT 'research'",
-                "ALTER TABLE extraction_runs ADD COLUMN IF NOT EXISTS "
-                "source_type VARCHAR(32) NOT NULL DEFAULT 'research'",
-                "ALTER TABLE entity_mentions ADD COLUMN IF NOT EXISTS "
-                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
-                "ALTER TABLE entities ADD COLUMN IF NOT EXISTS "
-                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
-                "ALTER TABLE raw_assertions ADD COLUMN IF NOT EXISTS "
-                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
-                "ALTER TABLE assertions ADD COLUMN IF NOT EXISTS "
-                "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
-                "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS "
-                "heartbeat_at TIMESTAMPTZ",
-                "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS "
-                "lease_expires_at TIMESTAMPTZ",
-            ):
-                await connection.execute(text(statement))
 
     async def register_document(self, document: DocumentInput) -> tuple[bool, bool]:
         """Return ``(created, changed)`` and invalidate jobs if the content changed."""
-        async with self.sessions.begin() as session:
-            current = await session.get(Document, document.document_id, with_for_update=True)
+        async with self._write_session() as session:
+            current = await session.get(Document, document.document_id)
             if current is None:
                 session.add(
                     Document(
@@ -180,7 +171,7 @@ class KnowledgeRepository:
         statement = statement.on_conflict_do_nothing(
             index_elements=["document_id", "stage", "stage_version"]
         )
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             result = await session.execute(statement)
             return result.rowcount or 0
 
@@ -193,8 +184,8 @@ class KnowledgeRepository:
         document_id: str | None = None,
         lease_seconds: float = 900.0,
     ) -> ClaimedJob | None:
-        """Atomically claim one pending job using PostgreSQL SKIP LOCKED."""
-        async with self.sessions.begin() as session:
+        """Atomically claim one pending job under SQLite's immediate write lock."""
+        async with self._write_session() as session:
             statement = (
                 select(ProcessingJob)
                 .where(
@@ -203,7 +194,6 @@ class KnowledgeRepository:
                     ProcessingJob.stage_version == stage_version,
                 )
                 .order_by(ProcessingJob.job_id)
-                .with_for_update(skip_locked=True)
                 .limit(1)
             )
             if document_id:
@@ -250,7 +240,7 @@ class KnowledgeRepository:
                 lease_expires_at=now + timedelta(seconds=lease_seconds),
             )
         )
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             result = await session.execute(statement)
             return bool(result.rowcount)
 
@@ -275,10 +265,16 @@ class KnowledgeRepository:
             }
             for chunk in chunks
         ]
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             if rows:
                 statement = insert(ExtractionChunk).values(rows).on_conflict_do_nothing(
-                    constraint="uq_extraction_chunk_unit"
+                    index_elements=[
+                        "document_id",
+                        "pass_name",
+                        "stage_version",
+                        "content_hash",
+                        "chunk_index",
+                    ]
                 )
                 await session.execute(statement)
             await session.execute(
@@ -315,7 +311,7 @@ class KnowledgeRepository:
         }
 
     async def start_chunk(self, job_id: uuid.UUID, chunk_index: int, worker_id: str) -> None:
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             await session.execute(
                 update(ExtractionChunk)
                 .where(
@@ -352,7 +348,7 @@ class KnowledgeRepository:
                 output_tokens=response.output_tokens,
             )
         )
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             result = await session.execute(statement)
             if not result.rowcount:
                 raise RuntimeError(
@@ -360,7 +356,7 @@ class KnowledgeRepository:
                 )
 
     async def fail_chunk(self, job_id: uuid.UUID, chunk_index: int, error: str) -> None:
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             await session.execute(
                 update(ExtractionChunk)
                 .where(
@@ -385,8 +381,8 @@ class KnowledgeRepository:
         raw_output: dict[str, Any],
     ) -> uuid.UUID:
         """Persist one Bronze pass and mark its job successful in one transaction."""
-        async with self.sessions.begin() as session:
-            locked_job = await session.get(ProcessingJob, job.job_id, with_for_update=True)
+        async with self._write_session() as session:
+            locked_job = await session.get(ProcessingJob, job.job_id)
             if locked_job is None or locked_job.status != JobStatus.RUNNING.value:
                 raise RuntimeError(f"Job {job.job_id} is not RUNNING")
             run = ExtractionRun(
@@ -478,8 +474,8 @@ class KnowledgeRepository:
         return (start, start + len(mention)) if start >= 0 else (None, None)
 
     async def fail_job(self, job_id: uuid.UUID, error: str) -> None:
-        async with self.sessions.begin() as session:
-            job = await session.get(ProcessingJob, job_id, with_for_update=True)
+        async with self._write_session() as session:
+            job = await session.get(ProcessingJob, job_id)
             if job is None:
                 return
             job.status = JobStatus.FAILED.value
@@ -509,7 +505,7 @@ class KnowledgeRepository:
             statement = statement.where(ProcessingJob.stage.startswith(stage_prefix))
         if document_id:
             statement = statement.where(ProcessingJob.document_id == document_id)
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             result = await session.execute(statement)
             return result.rowcount or 0
 
@@ -539,7 +535,7 @@ class KnowledgeRepository:
                 error_message="Recovered abandoned RUNNING job",
             )
         )
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             result = await session.execute(statement)
             return result.rowcount or 0
 
@@ -552,16 +548,14 @@ class KnowledgeRepository:
         tokens_per_minute: int,
     ) -> float:
         """Reserve a smooth global request/token slot and return seconds to wait."""
-        async with self.sessions.begin() as session:
-            now = await session.scalar(select(func.clock_timestamp()))
-            if now is None:
-                now = datetime.now(timezone.utc)
+        async with self._write_session() as session:
+            now = datetime.now(timezone.utc)
             await session.execute(
                 insert(APIRateLimit)
                 .values(limiter_key=limiter_key, next_request_at=now, next_token_at=now)
                 .on_conflict_do_nothing(index_elements=["limiter_key"])
             )
-            limiter = await session.get(APIRateLimit, limiter_key, with_for_update=True)
+            limiter = await session.get(APIRateLimit, limiter_key)
             if limiter is None:
                 raise RuntimeError(f"Unable to create API rate limiter {limiter_key!r}")
             scheduled_at = max(now, limiter.next_request_at, limiter.next_token_at)
@@ -584,11 +578,9 @@ class KnowledgeRepository:
         difference = actual_tokens - estimated_tokens
         if difference == 0:
             return
-        async with self.sessions.begin() as session:
-            now = await session.scalar(select(func.clock_timestamp()))
-            if now is None:
-                now = datetime.now(timezone.utc)
-            limiter = await session.get(APIRateLimit, limiter_key, with_for_update=True)
+        async with self._write_session() as session:
+            now = datetime.now(timezone.utc)
+            limiter = await session.get(APIRateLimit, limiter_key)
             if limiter is None:
                 return
             adjusted = limiter.next_token_at + timedelta(
@@ -619,6 +611,6 @@ class KnowledgeRepository:
             return 0
         statement = insert(RelationType).values([{"canonical_name": name} for name in names])
         statement = statement.on_conflict_do_nothing(index_elements=["canonical_name"])
-        async with self.sessions.begin() as session:
+        async with self._write_session() as session:
             result = await session.execute(statement)
             return result.rowcount or 0

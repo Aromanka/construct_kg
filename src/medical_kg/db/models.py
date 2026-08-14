@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -14,10 +15,11 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
+    Uuid,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -25,15 +27,32 @@ class Base(DeclarativeBase):
     pass
 
 
+class UTCDateTime(TypeDecorator[datetime]):
+    """Store UTC timestamps in SQLite and restore their timezone on read."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Any) -> datetime | None:
+        if value is not None and value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+    def process_result_value(self, value: datetime | None, dialect: Any) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTCDateTime(), server_default=func.now(), nullable=False
     )
 
 
 class UpdatedTimestampMixin(TimestampMixin):
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        UTCDateTime(), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
@@ -65,7 +84,7 @@ class DocumentRevision(Base, TimestampMixin):
 
     __tablename__ = "document_revisions"
     revision_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
@@ -85,7 +104,7 @@ class DocumentRevision(Base, TimestampMixin):
 class ExtractionRun(Base, TimestampMixin):
     __tablename__ = "extraction_runs"
     extraction_run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
@@ -104,7 +123,7 @@ class ExtractionRun(Base, TimestampMixin):
 class ProcessingJob(Base):
     __tablename__ = "processing_jobs"
     job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
@@ -114,10 +133,10 @@ class ProcessingJob(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     worker_id: Mapped[str | None] = mapped_column(String(255))
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     error_message: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (
         UniqueConstraint("document_id", "stage", "stage_version", name="uq_processing_unit"),
@@ -133,7 +152,7 @@ class ExtractionChunk(Base, UpdatedTimestampMixin):
 
     __tablename__ = "extraction_chunk_jobs"
     chunk_job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     job_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("processing_jobs.job_id", ondelete="CASCADE"), nullable=False
@@ -150,11 +169,11 @@ class ExtractionChunk(Base, UpdatedTimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
     worker_id: Mapped[str | None] = mapped_column(String(255))
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     error_message: Mapped[str | None] = mapped_column(Text)
-    validated_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    raw_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    validated_output: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    raw_output: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     __table_args__ = (
@@ -181,17 +200,17 @@ class APIRateLimit(Base):
 
     __tablename__ = "api_rate_limits"
     limiter_key: Mapped[str] = mapped_column(String(512), primary_key=True)
-    next_request_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    next_token_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_request_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    next_token_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        UTCDateTime(), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
 class EntityMention(Base, TimestampMixin):
     __tablename__ = "entity_mentions"
     mention_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
@@ -208,9 +227,9 @@ class EntityMention(Base, TimestampMixin):
     character_start: Mapped[int | None] = mapped_column(Integer)
     character_end: Mapped[int | None] = mapped_column(Integer)
     page: Mapped[int | None] = mapped_column(Integer)
-    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     __table_args__ = (
-        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_mention_sources_array"),
+        CheckConstraint("json_type(sources) = 'array'", name="ck_mention_sources_array"),
         Index("ix_mentions_document", "document_id"),
     )
 
@@ -221,16 +240,16 @@ class Entity(Base, UpdatedTimestampMixin):
     canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     __table_args__ = (
-        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_entity_sources_array"),
+        CheckConstraint("json_type(sources) = 'array'", name="ck_entity_sources_array"),
     )
 
 
 class EntityAlias(Base, TimestampMixin):
     __tablename__ = "entity_aliases"
     alias_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     entity_id: Mapped[str] = mapped_column(
         ForeignKey("entities.entity_id", ondelete="CASCADE"), nullable=False
@@ -250,7 +269,7 @@ class EntityAlias(Base, TimestampMixin):
 class EntityExternalId(Base, TimestampMixin):
     __tablename__ = "entity_external_ids"
     mapping_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     entity_id: Mapped[str] = mapped_column(
         ForeignKey("entities.entity_id", ondelete="CASCADE"), nullable=False
@@ -274,7 +293,7 @@ class EntityExternalId(Base, TimestampMixin):
 class RawAssertion(Base, TimestampMixin):
     __tablename__ = "raw_assertions"
     raw_assertion_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
@@ -295,16 +314,16 @@ class RawAssertion(Base, TimestampMixin):
     detailed_relation: Mapped[str] = mapped_column(Text, nullable=False)
     llm_confidence: Mapped[float] = mapped_column(Float, nullable=False)
     evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
-    qualifiers: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    qualifiers: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     negated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     speculative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    raw_llm_output: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    raw_llm_output: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     evidence_validated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     validation_error: Mapped[str | None] = mapped_column(Text)
-    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     __table_args__ = (
         CheckConstraint("llm_confidence >= 0 AND llm_confidence <= 1", name="ck_llm_confidence"),
-        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_raw_assertion_sources_array"),
+        CheckConstraint("json_type(sources) = 'array'", name="ck_raw_assertion_sources_array"),
         Index("ix_raw_assertions_document", "document_id"),
     )
 
@@ -312,7 +331,7 @@ class RawAssertion(Base, TimestampMixin):
 class RelationType(Base, UpdatedTimestampMixin):
     __tablename__ = "relation_types"
     relation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     canonical_name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -328,7 +347,7 @@ class RelationType(Base, UpdatedTimestampMixin):
 class Assertion(Base, UpdatedTimestampMixin):
     __tablename__ = "assertions"
     assertion_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     raw_assertion_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("raw_assertions.raw_assertion_id"), nullable=False, unique=True
@@ -338,24 +357,24 @@ class Assertion(Base, UpdatedTimestampMixin):
     canonical_relation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("relation_types.relation_id"), nullable=False
     )
-    qualifiers: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    qualifiers: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     negated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     speculative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     normalized_identity: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     __table_args__ = (
-        CheckConstraint("jsonb_typeof(sources) = 'array'", name="ck_assertion_sources_array"),
+        CheckConstraint("json_type(sources) = 'array'", name="ck_assertion_sources_array"),
     )
 
 
 class InvalidRecord(Base, TimestampMixin):
     __tablename__ = "invalid_records"
     invalid_record_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.document_id"))
     stage: Mapped[str] = mapped_column(String(128), nullable=False)
     source_table: Mapped[str] = mapped_column(String(128), nullable=False)
     source_id: Mapped[str | None] = mapped_column(String(255))
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)

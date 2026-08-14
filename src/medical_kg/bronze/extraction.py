@@ -286,7 +286,7 @@ class BronzeExtractor:
                 )
             finally:
                 if job is not None:
-                    # A claimer can reserve another PostgreSQL job only after this one has
+                    # A claimer can reserve another SQLite job only after this one has
                     # completed, so queued jobs never sit without a heartbeat lease.
                     available_job_slots.release()
                 queue.task_done()

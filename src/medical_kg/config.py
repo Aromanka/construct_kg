@@ -25,8 +25,6 @@ class ProcessingSettings(BaseModel):
     job_concurrency: int = Field(default=100, ge=1)
     api_concurrency: int = Field(default=100, ge=1)
     chunk_queue_size: int = Field(default=300, ge=1)
-    database_pool_size: int = Field(default=20, ge=1)
-    database_max_overflow: int = Field(default=20, ge=0)
     requests_per_minute: int = Field(default=100, ge=1)
     tokens_per_minute: int = Field(default=1_000_000, ge=1)
     reserved_output_tokens: int = Field(default=4096, ge=0)
@@ -56,20 +54,13 @@ class ProcessingSettings(BaseModel):
 
 
 class DatabaseSettings(BaseModel):
-    host: str = "localhost"
-    port: int = Field(default=5432, ge=1, le=65535)
-    database: str = "medical_kg"
-    user: str
-    password: SecretStr
+    path: Path = Path("data/medical_kg.sqlite3")
+    timeout: float = Field(default=30.0, gt=0)
     echo: bool = False
 
     @property
     def url(self) -> str:
-        from urllib.parse import quote_plus
-
-        password = quote_plus(self.password.get_secret_value())
-        user = quote_plus(self.user)
-        return f"postgresql+asyncpg://{user}:{password}@{self.host}:{self.port}/{self.database}"
+        return f"sqlite+aiosqlite:///{self.path.as_posix()}"
 
 
 class ExtractionSettings(BaseModel):
@@ -109,6 +100,8 @@ class AppSettings(BaseModel):
 
     @model_validator(mode="after")
     def resolve_paths(self) -> AppSettings:
+        if not self.database.path.is_absolute():
+            self.database.path = self.project_root / self.database.path
         if not self.relations.vocabulary_file.is_absolute():
             self.relations.vocabulary_file = self.project_root / self.relations.vocabulary_file
         if not self.prompts.directory.is_absolute():

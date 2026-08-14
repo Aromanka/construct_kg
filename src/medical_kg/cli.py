@@ -7,6 +7,7 @@ from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from medical_kg.bronze.extraction import BronzeExtractor
@@ -46,13 +47,23 @@ def _settings(config: Path) -> AppSettings:
 
 
 def _repository(settings: AppSettings) -> KnowledgeRepository:
+    settings.database.path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_async_engine(
         settings.database.url,
         echo=settings.database.echo,
-        pool_pre_ping=True,
-        pool_size=settings.processing.database_pool_size,
-        max_overflow=settings.processing.database_max_overflow,
+        connect_args={"timeout": settings.database.timeout},
     )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def configure_sqlite(dbapi_connection: Any, _: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute(f"PRAGMA busy_timeout={int(settings.database.timeout * 1000)}")
+        finally:
+            cursor.close()
+
     return KnowledgeRepository(engine)
 
 
@@ -165,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    init_db = commands.add_parser("init-db", help="Create or upgrade the database schema")
+    init_db = commands.add_parser("init-db", help="Initialize the SQLite database schema")
     _add_config(init_db)
 
     ingest = commands.add_parser("ingest", help="Register local documents")

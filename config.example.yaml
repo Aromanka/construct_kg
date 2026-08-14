@@ -11,8 +11,6 @@ processing:
   job_concurrency: 100
   api_concurrency: 100
   chunk_queue_size: 300
-  database_pool_size: 20
-  database_max_overflow: 20
   requests_per_minute: 100
   tokens_per_minute: 1000000
   reserved_output_tokens: 4096
@@ -24,11 +22,8 @@ processing:
   heartbeat_interval: 30
 
 database:
-  host: localhost
-  port: 5432
-  database: medical_kg
-  user: postgres
-  password: ${POSTGRES_PASSWORD}
+  path: data/medical_kg.sqlite3
+  timeout: 30
   echo: false
 
 extraction:

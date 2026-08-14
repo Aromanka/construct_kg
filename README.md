@@ -1,7 +1,7 @@
 # Medical Literature Knowledge Graph
 
 A maintainable, evidence-aware Python pipeline that converts local biomedical papers into a
-resumable PostgreSQL knowledge base. The current implementation deliberately focuses on the
+resumable SQLite knowledge base. The current implementation deliberately focuses on the
 Phase I Bronze pipeline: reliable full-document extraction and faithful persistence of entity
 mentions, raw assertions, qualifiers, evidence, model output, and provenance.
 
@@ -19,9 +19,9 @@ mentions, raw assertions, qualifiers, evidence, model output, and provenance.
   interface; the OpenAI SDK is not required.
 - Pydantic validation, including controlled biomedical entity types, `OTHER` detail, extensible
   qualifiers, and confidence bounds.
-- PostgreSQL persistence for all Landing, Bronze, Silver, and Gold objects described by the
+- SQLite persistence for all Landing, Bronze, Silver, and Gold objects described by the
   architecture specification.
-- Transactional job claiming with `FOR UPDATE SKIP LOCKED`, independent failures, bounded
+- Atomic job claiming with SQLite immediate transactions, independent failures, bounded
   concurrency, request/token rate limiting, bounded retries, and resume/retry commands.
 - Exact source-evidence validation and deterministic mention offsets where possible.
 - Structured logs and run-level request/token/success statistics.
@@ -30,8 +30,8 @@ mentions, raw assertions, qualifiers, evidence, model output, and provenance.
 
 ## Setup
 
-Python 3.10+ in a Conda environment and PostgreSQL are required. The base installation
-intentionally declares only the five direct runtime libraries needed by the core PostgreSQL and
+Python 3.10+ in a Conda environment is required; SQLite is bundled with Python. The base installation
+intentionally declares only the five direct runtime libraries needed by the core SQLite and
 LLM pipeline.
 
 ```bash
@@ -42,8 +42,8 @@ python -m pip install -e .
 
 Copy `config.example.yaml` to `config.yaml` before running the project.
 
-Set `DEEPSEEK_API_KEY` and `POSTGRES_PASSWORD`, or replace their environment placeholders in the
-local `config.yaml`. That file is ignored by Git. Optional features are installed only when needed:
+Set `DEEPSEEK_API_KEY`, or replace its environment placeholder in the local `config.yaml`. That
+file is ignored by Git. Optional features are installed only when needed:
 
 ```bash
 # PDF ingestion
@@ -61,6 +61,17 @@ Create the schema and seed the configured relation vocabulary:
 ```bash
 python -m medical_kg init-db --config config.yaml
 ```
+
+The default database configuration uses a project-local file:
+
+```yaml
+database:
+  path: data/medical_kg.sqlite3
+  timeout: 30
+  echo: false
+```
+
+Relative database paths are resolved from the directory containing `config.yaml`.
 
 ## Input
 
@@ -110,8 +121,8 @@ python -m medical_kg run "data/knowledge_base" --source-type guidelines --chunk-
 ```
 
 PDF ingestion requires `python -m pip install -e ".[pdf]"` in the active Conda environment.
-PostgreSQL must be running and the database
-settings in `config.yaml` must be valid before extraction.
+The SQLite database file and its parent directory are created automatically. The configured path
+must be writable by the account running the pipeline.
 The compatible client explicitly uses the operating system's trusted CA context, so an unrelated
 or stale `SSL_CERT_FILE` override is not read during HTTP client initialization.
 
@@ -126,7 +137,7 @@ change.
 ### Parallel extraction
 
 API requests use a bounded asynchronous queue and default to 100 concurrent connections. Chunked
-documents execute their chunks concurrently, while PostgreSQL-backed chunk checkpoints prevent
+documents execute their chunks concurrently, while SQLite-backed chunk checkpoints prevent
 successful chunks from being requested again after an interruption. A small set of job claimers
 feeds up to 100 active parent jobs, and job heartbeats prevent a long extraction from being
 mistaken for an abandoned worker.
@@ -138,17 +149,17 @@ job_claimers: 8
 job_concurrency: 100
 api_concurrency: 100
 chunk_queue_size: 300
-database_pool_size: 20
-database_max_overflow: 20
 requests_per_minute: 100
 tokens_per_minute: 1000000
 distributed_rate_limit: true
 ```
 
-Concurrency is only an upper bound. The shared PostgreSQL rate limiter smooths requests across all
-processes and servers, so actual in-flight requests also depend on provider RPM/TPM limits and API
-latency. After upgrading an existing checkout, run `python -m medical_kg init-db --config
-config.yaml` once to add the chunk-checkpoint, rate-limit, heartbeat, and lease schema.
+Concurrency is only an upper bound. The shared SQLite rate limiter smooths requests across
+processes using the same local database file, so actual in-flight requests also depend on provider
+RPM/TPM limits and API latency. WAL mode and a busy timeout are enabled automatically, but SQLite
+still has one writer at a time; keep the database on a local disk rather than NFS or another network
+filesystem. After upgrading an existing checkout, run `python -m medical_kg init-db --config
+config.yaml` once to create the current schema.
 
 ### Inspecting an interrupted build
 
@@ -177,7 +188,7 @@ Local papers
   -> [Phase III] ontology enrichment and graph/export projections
 ```
 
-PostgreSQL is authoritative. Prompt files live in `prompts/`, runtime configuration in
+The SQLite file is authoritative. Prompt files live in `prompts/`, runtime configuration in
 `config.example.yaml`, and the canonical relation vocabulary in `config/relations.yaml`.
 
 ## Development

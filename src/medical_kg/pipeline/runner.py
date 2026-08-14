@@ -35,7 +35,7 @@ class PipelineRunner:
         chunk_size: int | None = None,
         chunk_overlap: int = 0,
     ) -> RunStatistics:
-        # Fail invalid chunk settings before touching job state in PostgreSQL.
+        # Fail invalid chunk settings before touching job state in SQLite.
         self.extractor.stage_version(chunk_size, chunk_overlap)
         # Twice the worst configured provider window avoids stealing legitimate long retries while
         # ensuring a worker crash does not leave work permanently stuck in RUNNING.
