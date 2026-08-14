@@ -123,6 +123,33 @@ extraction pass, effective stage version)` is skipped on subsequent runs. Chunk 
 of that effective version. Increase `extraction.stage_version` when other extraction semantics
 change.
 
+### Parallel extraction
+
+API requests use a bounded asynchronous queue and default to 100 concurrent connections. Chunked
+documents execute their chunks concurrently, while PostgreSQL-backed chunk checkpoints prevent
+successful chunks from being requested again after an interruption. A small set of job claimers
+feeds up to 100 active parent jobs, and job heartbeats prevent a long extraction from being
+mistaken for an abandoned worker.
+
+The relevant settings are under `processing` in `config.yaml`:
+
+```yaml
+job_claimers: 8
+job_concurrency: 100
+api_concurrency: 100
+chunk_queue_size: 300
+database_pool_size: 20
+database_max_overflow: 20
+requests_per_minute: 100
+tokens_per_minute: 1000000
+distributed_rate_limit: true
+```
+
+Concurrency is only an upper bound. The shared PostgreSQL rate limiter smooths requests across all
+processes and servers, so actual in-flight requests also depend on provider RPM/TPM limits and API
+latency. After upgrading an existing checkout, run `python -m medical_kg init-db --config
+config.yaml` once to add the chunk-checkpoint, rate-limit, heartbeat, and lease schema.
+
 ### Inspecting an interrupted build
 
 The statistics command is read-only and reports committed documents, job states, completed

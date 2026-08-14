@@ -51,6 +51,9 @@ conda activate medical-kg
 python -m pip install -e ".[pdf]"
 export DEEPSEEK_API_KEY='...'
 export POSTGRES_PASSWORD='...'
+
+# Idempotently apply any schema additions introduced by the restored code version.
+python -m medical_kg init-db --config config.yaml
 ```
 
 检查 `config.yaml` 中数据库地址，并保持 `extraction.stage_version`、prompts、模型名称、
@@ -63,7 +66,8 @@ export POSTGRES_PASSWORD='...'
 ```bash
 psql -h localhost -U postgres -d medical_kg -c \
   "UPDATE processing_jobs SET status='PENDING', worker_id=NULL, started_at=NULL, \
-   finished_at=NULL, error_message='Recovered after server migration' \
+   heartbeat_at=NULL, lease_expires_at=NULL, finished_at=NULL, \
+   error_message='Recovered after server migration' \
    WHERE status='RUNNING';"
 ```
 

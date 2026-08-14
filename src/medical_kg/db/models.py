@@ -115,6 +115,8 @@ class ProcessingJob(Base):
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     worker_id: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (
@@ -123,6 +125,66 @@ class ProcessingJob(Base):
             "status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED')", name="ck_job_status"
         ),
         Index("ix_jobs_status_stage", "status", "stage"),
+    )
+
+
+class ExtractionChunk(Base, UpdatedTimestampMixin):
+    """Durable API-level checkpoint for one deterministic document chunk."""
+
+    __tablename__ = "extraction_chunk_jobs"
+    chunk_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("processing_jobs.job_id", ondelete="CASCADE"), nullable=False
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
+    )
+    pass_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    validated_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    raw_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "pass_name",
+            "stage_version",
+            "content_hash",
+            "chunk_index",
+            name="uq_extraction_chunk_unit",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED')",
+            name="ck_extraction_chunk_status",
+        ),
+        CheckConstraint("input_tokens >= 0", name="ck_extraction_chunk_input_tokens"),
+        CheckConstraint("output_tokens >= 0", name="ck_extraction_chunk_output_tokens"),
+        Index("ix_extraction_chunks_job_status", "job_id", "status"),
+    )
+
+
+class APIRateLimit(Base):
+    """Shared virtual schedule used to enforce provider limits across processes."""
+
+    __tablename__ = "api_rate_limits"
+    limiter_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    next_request_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_token_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 

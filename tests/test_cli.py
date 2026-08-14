@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from medical_kg.cli import build_parser, main
+from medical_kg.config import ProcessingSettings
 
 
 def test_run_parser_accepts_lightweight_module_command_options() -> None:
@@ -38,3 +39,17 @@ def test_stats_parser_accepts_config() -> None:
 
     assert args.command == "stats"
     assert args.config == Path("local.yaml")
+
+
+def test_default_api_concurrency_is_one_hundred() -> None:
+    settings = ProcessingSettings()
+
+    assert settings.api_concurrency == 100
+    assert settings.job_concurrency == 100
+
+
+def test_legacy_max_concurrency_is_migrated() -> None:
+    settings = ProcessingSettings.model_validate({"max_concurrency": 12})
+
+    assert settings.api_concurrency == 12
+    assert settings.job_concurrency == 12

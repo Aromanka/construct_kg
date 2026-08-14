@@ -21,12 +21,38 @@ class LLMSettings(BaseModel):
 
 
 class ProcessingSettings(BaseModel):
-    max_concurrency: int = Field(default=8, ge=1)
+    job_claimers: int = Field(default=8, ge=1)
+    job_concurrency: int = Field(default=100, ge=1)
+    api_concurrency: int = Field(default=100, ge=1)
+    chunk_queue_size: int = Field(default=300, ge=1)
+    database_pool_size: int = Field(default=20, ge=1)
+    database_max_overflow: int = Field(default=20, ge=0)
     requests_per_minute: int = Field(default=100, ge=1)
     tokens_per_minute: int = Field(default=1_000_000, ge=1)
+    reserved_output_tokens: int = Field(default=4096, ge=0)
+    distributed_rate_limit: bool = True
     max_retries: int = Field(default=4, ge=0)
     request_timeout: float = Field(default=120.0, gt=0)
     retry_backoff: float = Field(default=2.0, gt=0)
+    job_lease_seconds: float = Field(default=900.0, gt=0)
+    heartbeat_interval: float = Field(default=30.0, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_concurrency(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "max_concurrency" not in value:
+            return value
+        migrated = dict(value)
+        legacy = migrated.pop("max_concurrency")
+        migrated.setdefault("job_concurrency", legacy)
+        migrated.setdefault("api_concurrency", legacy)
+        return migrated
+
+    @model_validator(mode="after")
+    def validate_parallelism(self) -> ProcessingSettings:
+        if self.heartbeat_interval >= self.job_lease_seconds:
+            raise ValueError("processing.heartbeat_interval must be smaller than job_lease_seconds")
+        return self
 
 
 class DatabaseSettings(BaseModel):

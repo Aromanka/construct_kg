@@ -47,7 +47,11 @@ def _settings(config: Path) -> AppSettings:
 
 def _repository(settings: AppSettings) -> KnowledgeRepository:
     engine = create_async_engine(
-        settings.database.url, echo=settings.database.echo, pool_pre_ping=True
+        settings.database.url,
+        echo=settings.database.echo,
+        pool_pre_ping=True,
+        pool_size=settings.processing.database_pool_size,
+        max_overflow=settings.processing.database_max_overflow,
     )
     return KnowledgeRepository(engine)
 

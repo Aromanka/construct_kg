@@ -21,6 +21,7 @@ class CompatibleAPIClient(LLMClient):
         model: str,
         base_url: str,
         timeout: float = 120.0,
+        max_connections: int = 100,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.model = model
@@ -31,6 +32,11 @@ class CompatibleAPIClient(LLMClient):
                 "Content-Type": "application/json",
             },
             timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=max_connections + max(10, max_connections // 5),
+                max_keepalive_connections=max_connections,
+                keepalive_expiry=60.0,
+            ),
             # An explicit system context keeps TLS verification enabled while preventing HTTPX
             # from replacing it with a stale SSL_CERT_FILE environment override.
             verify=ssl.create_default_context(),
@@ -112,4 +118,5 @@ def create_llm_client(settings: AppSettings) -> LLMClient:
         model=settings.llm.model,
         base_url=settings.llm.base_url,
         timeout=settings.llm.timeout,
+        max_connections=settings.processing.api_concurrency,
     )

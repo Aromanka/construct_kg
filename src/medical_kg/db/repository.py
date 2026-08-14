@@ -6,15 +6,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from medical_kg.db.models import (
+    APIRateLimit,
     Base,
     Document,
     DocumentRevision,
     EntityMention,
+    ExtractionChunk,
     ExtractionRun,
     ProcessingJob,
     RawAssertion,
@@ -36,6 +38,16 @@ class ClaimedJob:
     content: str
     content_hash: str
     source_type: str
+    worker_id: str = ""
+
+
+@dataclass(frozen=True)
+class StoredChunkResult:
+    chunk_index: int
+    validated_output: dict[str, Any]
+    raw_output: dict[str, Any]
+    input_tokens: int
+    output_tokens: int
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,10 @@ class KnowledgeRepository:
                 "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
                 "ALTER TABLE assertions ADD COLUMN IF NOT EXISTS "
                 "sources JSONB NOT NULL DEFAULT '[]'::jsonb",
+                "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS "
+                "heartbeat_at TIMESTAMPTZ",
+                "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS "
+                "lease_expires_at TIMESTAMPTZ",
             ):
                 await connection.execute(text(statement))
 
@@ -175,6 +191,7 @@ class KnowledgeRepository:
         stage_version: str,
         worker_id: str,
         document_id: str | None = None,
+        lease_seconds: float = 900.0,
     ) -> ClaimedJob | None:
         """Atomically claim one pending job using PostgreSQL SKIP LOCKED."""
         async with self.sessions.begin() as session:
@@ -199,7 +216,10 @@ class KnowledgeRepository:
                 raise RuntimeError(f"Job {job.job_id} refers to missing document {job.document_id}")
             job.status = JobStatus.RUNNING.value
             job.worker_id = worker_id
-            job.started_at = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            job.started_at = now
+            job.heartbeat_at = now
+            job.lease_expires_at = now + timedelta(seconds=lease_seconds)
             job.finished_at = None
             job.error_message = None
             return ClaimedJob(
@@ -211,6 +231,149 @@ class KnowledgeRepository:
                 content=document.content,
                 content_hash=document.content_hash,
                 source_type=document.source_type,
+                worker_id=worker_id,
+            )
+
+    async def heartbeat_job(
+        self, job_id: uuid.UUID, *, worker_id: str, lease_seconds: float
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        statement = (
+            update(ProcessingJob)
+            .where(
+                ProcessingJob.job_id == job_id,
+                ProcessingJob.status == JobStatus.RUNNING.value,
+                ProcessingJob.worker_id == worker_id,
+            )
+            .values(
+                heartbeat_at=now,
+                lease_expires_at=now + timedelta(seconds=lease_seconds),
+            )
+        )
+        async with self.sessions.begin() as session:
+            result = await session.execute(statement)
+            return bool(result.rowcount)
+
+    async def prepare_chunks(
+        self,
+        *,
+        job: ClaimedJob,
+        pass_name: str,
+        chunks: Sequence[Any],
+    ) -> dict[int, StoredChunkResult]:
+        rows = [
+            {
+                "job_id": job.job_id,
+                "document_id": job.document_id,
+                "pass_name": pass_name,
+                "stage_version": job.stage_version,
+                "content_hash": job.content_hash,
+                "chunk_index": chunk.index,
+                "character_start": chunk.character_start,
+                "character_end": chunk.character_end,
+                "status": JobStatus.PENDING.value,
+            }
+            for chunk in chunks
+        ]
+        async with self.sessions.begin() as session:
+            if rows:
+                statement = insert(ExtractionChunk).values(rows).on_conflict_do_nothing(
+                    constraint="uq_extraction_chunk_unit"
+                )
+                await session.execute(statement)
+            await session.execute(
+                update(ExtractionChunk)
+                .where(
+                    ExtractionChunk.job_id == job.job_id,
+                    ExtractionChunk.status != JobStatus.SUCCESS.value,
+                )
+                .values(
+                    status=JobStatus.PENDING.value,
+                    worker_id=None,
+                    started_at=None,
+                    finished_at=None,
+                    error_message=None,
+                )
+            )
+            successful = (
+                await session.scalars(
+                    select(ExtractionChunk).where(
+                        ExtractionChunk.job_id == job.job_id,
+                        ExtractionChunk.status == JobStatus.SUCCESS.value,
+                    )
+                )
+            ).all()
+        return {
+            chunk.chunk_index: StoredChunkResult(
+                chunk_index=chunk.chunk_index,
+                validated_output=chunk.validated_output or {},
+                raw_output=chunk.raw_output or {},
+                input_tokens=chunk.input_tokens,
+                output_tokens=chunk.output_tokens,
+            )
+            for chunk in successful
+        }
+
+    async def start_chunk(self, job_id: uuid.UUID, chunk_index: int, worker_id: str) -> None:
+        async with self.sessions.begin() as session:
+            await session.execute(
+                update(ExtractionChunk)
+                .where(
+                    ExtractionChunk.job_id == job_id,
+                    ExtractionChunk.chunk_index == chunk_index,
+                    ExtractionChunk.status != JobStatus.SUCCESS.value,
+                )
+                .values(
+                    status=JobStatus.RUNNING.value,
+                    worker_id=worker_id,
+                    started_at=datetime.now(timezone.utc),
+                    finished_at=None,
+                    error_message=None,
+                )
+            )
+
+    async def complete_chunk(
+        self, job_id: uuid.UUID, chunk_index: int, response: Any
+    ) -> None:
+        statement = (
+            update(ExtractionChunk)
+            .where(
+                ExtractionChunk.job_id == job_id,
+                ExtractionChunk.chunk_index == chunk_index,
+                ExtractionChunk.status == JobStatus.RUNNING.value,
+            )
+            .values(
+                status=JobStatus.SUCCESS.value,
+                finished_at=datetime.now(timezone.utc),
+                error_message=None,
+                validated_output=response.output.model_dump(mode="json"),
+                raw_output=response.raw_output,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+            )
+        )
+        async with self.sessions.begin() as session:
+            result = await session.execute(statement)
+            if not result.rowcount:
+                raise RuntimeError(
+                    f"Chunk {chunk_index} for job {job_id} is not RUNNING"
+                )
+
+    async def fail_chunk(self, job_id: uuid.UUID, chunk_index: int, error: str) -> None:
+        async with self.sessions.begin() as session:
+            await session.execute(
+                update(ExtractionChunk)
+                .where(
+                    ExtractionChunk.job_id == job_id,
+                    ExtractionChunk.chunk_index == chunk_index,
+                    ExtractionChunk.status != JobStatus.SUCCESS.value,
+                )
+                .values(
+                    status=JobStatus.FAILED.value,
+                    retry_count=ExtractionChunk.retry_count + 1,
+                    finished_at=datetime.now(timezone.utc),
+                    error_message=error[:20_000],
+                )
             )
 
     async def complete_extraction(
@@ -297,6 +460,8 @@ class KnowledgeRepository:
 
             locked_job.status = JobStatus.SUCCESS.value
             locked_job.finished_at = datetime.now(timezone.utc)
+            locked_job.heartbeat_at = None
+            locked_job.lease_expires_at = None
             locked_job.error_message = None
             return run.extraction_run_id
 
@@ -320,6 +485,8 @@ class KnowledgeRepository:
             job.status = JobStatus.FAILED.value
             job.retry_count += 1
             job.finished_at = datetime.now(timezone.utc)
+            job.heartbeat_at = None
+            job.lease_expires_at = None
             job.error_message = error[:20_000]
 
     async def retry_failed(
@@ -332,6 +499,8 @@ class KnowledgeRepository:
                 status=JobStatus.PENDING.value,
                 worker_id=None,
                 started_at=None,
+                heartbeat_at=None,
+                lease_expires_at=None,
                 finished_at=None,
                 error_message=None,
             )
@@ -346,17 +515,26 @@ class KnowledgeRepository:
 
     async def recover_stale_jobs(self, *, older_than_seconds: float) -> int:
         """Return abandoned RUNNING jobs to PENDING without disturbing active workers."""
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=older_than_seconds)
         statement = (
             update(ProcessingJob)
             .where(
                 ProcessingJob.status == JobStatus.RUNNING.value,
-                ProcessingJob.started_at < cutoff,
+                or_(
+                    ProcessingJob.lease_expires_at < now,
+                    and_(
+                        ProcessingJob.lease_expires_at.is_(None),
+                        ProcessingJob.started_at < cutoff,
+                    ),
+                ),
             )
             .values(
                 status=JobStatus.PENDING.value,
                 worker_id=None,
                 started_at=None,
+                heartbeat_at=None,
+                lease_expires_at=None,
                 finished_at=None,
                 error_message="Recovered abandoned RUNNING job",
             )
@@ -364,6 +542,59 @@ class KnowledgeRepository:
         async with self.sessions.begin() as session:
             result = await session.execute(statement)
             return result.rowcount or 0
+
+    async def reserve_api_capacity(
+        self,
+        *,
+        limiter_key: str,
+        estimated_tokens: int,
+        requests_per_minute: int,
+        tokens_per_minute: int,
+    ) -> float:
+        """Reserve a smooth global request/token slot and return seconds to wait."""
+        async with self.sessions.begin() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            if now is None:
+                now = datetime.now(timezone.utc)
+            await session.execute(
+                insert(APIRateLimit)
+                .values(limiter_key=limiter_key, next_request_at=now, next_token_at=now)
+                .on_conflict_do_nothing(index_elements=["limiter_key"])
+            )
+            limiter = await session.get(APIRateLimit, limiter_key, with_for_update=True)
+            if limiter is None:
+                raise RuntimeError(f"Unable to create API rate limiter {limiter_key!r}")
+            scheduled_at = max(now, limiter.next_request_at, limiter.next_token_at)
+            limiter.next_request_at = scheduled_at + timedelta(
+                seconds=60 / requests_per_minute
+            )
+            limiter.next_token_at = scheduled_at + timedelta(
+                seconds=60 * estimated_tokens / tokens_per_minute
+            )
+            return max(0.0, (scheduled_at - now).total_seconds())
+
+    async def reconcile_api_tokens(
+        self,
+        *,
+        limiter_key: str,
+        estimated_tokens: int,
+        actual_tokens: int,
+        tokens_per_minute: int,
+    ) -> None:
+        difference = actual_tokens - estimated_tokens
+        if difference == 0:
+            return
+        async with self.sessions.begin() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            if now is None:
+                now = datetime.now(timezone.utc)
+            limiter = await session.get(APIRateLimit, limiter_key, with_for_update=True)
+            if limiter is None:
+                return
+            adjusted = limiter.next_token_at + timedelta(
+                seconds=60 * difference / tokens_per_minute
+            )
+            limiter.next_token_at = max(now, adjusted)
 
     async def job_status(self) -> list[dict[str, Any]]:
         statement = (

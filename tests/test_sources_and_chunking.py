@@ -1,8 +1,10 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from medical_kg.bronze.extraction import BronzeExtractor
@@ -14,7 +16,7 @@ from medical_kg.db.models import (
     ExtractionRun,
     RawAssertion,
 )
-from medical_kg.db.repository import ClaimedJob
+from medical_kg.db.repository import ClaimedJob, StoredChunkResult
 from medical_kg.landing.chunking import chunk_document
 from medical_kg.landing.loader import DocumentLoader
 from medical_kg.llm.base import LLMResponse
@@ -86,6 +88,10 @@ async def test_extractor_processes_each_chunk_and_persists_one_merged_run() -> N
         processing=SimpleNamespace(
             requests_per_minute=100,
             tokens_per_minute=100_000,
+            reserved_output_tokens=0,
+            distributed_rate_limit=False,
+            api_concurrency=100,
+            chunk_queue_size=300,
             max_retries=0,
             retry_backoff=1,
             request_timeout=10,
@@ -96,6 +102,7 @@ async def test_extractor_processes_each_chunk_and_persists_one_merged_run() -> N
         llm=SimpleNamespace(provider="test", model="test-model", temperature=0.0),
     )
     repository = AsyncMock()
+    repository.prepare_chunks.return_value = {}
     repository.complete_extraction.return_value = uuid4()
     llm = AsyncMock()
     llm.extract_document.side_effect = [
@@ -140,6 +147,8 @@ async def test_extractor_retries_without_an_external_retry_framework() -> None:
         processing=SimpleNamespace(
             requests_per_minute=100,
             tokens_per_minute=100_000,
+            reserved_output_tokens=0,
+            distributed_rate_limit=False,
             max_retries=1,
             retry_backoff=0,
             request_timeout=10,
@@ -148,7 +157,7 @@ async def test_extractor_retries_without_an_external_retry_framework() -> None:
     )
     llm = AsyncMock()
     llm.extract_document.side_effect = [
-        RuntimeError("temporary failure"),
+        httpx.ReadTimeout("temporary failure"),
         LLMResponse(output=ExtractionOutput(), raw_output={}),
     ]
     extractor = BronzeExtractor(
@@ -163,6 +172,167 @@ async def test_extractor_retries_without_an_external_retry_framework() -> None:
 
     assert response.output.assertions == []
     assert statistics.requests == 2
+
+
+@pytest.mark.asyncio
+async def test_extractor_does_not_retry_permanent_http_errors() -> None:
+    settings = SimpleNamespace(
+        processing=SimpleNamespace(
+            requests_per_minute=100,
+            tokens_per_minute=100_000,
+            reserved_output_tokens=0,
+            distributed_rate_limit=False,
+            max_retries=4,
+            retry_backoff=1,
+            request_timeout=10,
+        ),
+        llm=SimpleNamespace(temperature=0.0),
+    )
+    request = httpx.Request("POST", "https://example.test/chat/completions")
+    response = httpx.Response(400, request=request)
+    error = httpx.HTTPStatusError("bad request", request=request, response=response)
+    llm = AsyncMock()
+    llm.extract_document.side_effect = error
+    extractor = BronzeExtractor(
+        settings=settings,
+        repository=AsyncMock(),
+        llm=llm,
+        prompts=AsyncMock(),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await extractor._request("text", "system", "user", SimpleNamespace(requests=0))
+
+    assert llm.extract_document.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_chunk_checkpoint_is_reused_without_an_api_request() -> None:
+    settings = SimpleNamespace(
+        processing=SimpleNamespace(
+            requests_per_minute=100_000,
+            tokens_per_minute=100_000_000,
+            reserved_output_tokens=0,
+            distributed_rate_limit=False,
+            api_concurrency=100,
+            chunk_queue_size=300,
+            max_retries=0,
+            retry_backoff=1,
+            request_timeout=10,
+        ),
+        extraction=SimpleNamespace(
+            stage_version="extract:v1", passes=["general"], code_version="x"
+        ),
+        llm=SimpleNamespace(provider="test", model="test-model", temperature=0.0),
+    )
+    repository = AsyncMock()
+    repository.prepare_chunks.return_value = {
+        0: StoredChunkResult(
+            chunk_index=0,
+            validated_output={"assertions": []},
+            raw_output={"checkpoint": 0},
+            input_tokens=10,
+            output_tokens=2,
+        )
+    }
+    repository.complete_extraction.return_value = uuid4()
+    llm = AsyncMock()
+    llm.extract_document.return_value = LLMResponse(
+        output=ExtractionOutput(), raw_output={"requested": 1}
+    )
+    prompts = SimpleNamespace(
+        extraction=Mock(
+            return_value=PromptDefinition(
+                name="test", version="v1", system_prompt="system", user_template="{document}"
+            )
+        )
+    )
+    extractor = BronzeExtractor(settings=settings, repository=repository, llm=llm, prompts=prompts)
+    job = ClaimedJob(
+        job_id=uuid4(),
+        document_id="doc-resume",
+        stage="extract:general",
+        stage_version="extract:v1|chunk=1,overlap=0",
+        retry_count=1,
+        content="ab",
+        content_hash="0" * 64,
+        source_type="research",
+    )
+
+    result = await extractor._process(job, chunk_size=1)
+
+    assert result.documents_successful == 1
+    assert result.requests == 1
+    assert llm.extract_document.await_count == 1
+    repository.start_chunk.assert_awaited_once_with(job.job_id, 1, "")
+
+
+@pytest.mark.asyncio
+async def test_single_chunked_job_can_reach_one_hundred_api_requests_in_flight() -> None:
+    settings = SimpleNamespace(
+        processing=SimpleNamespace(
+            requests_per_minute=10_000_000,
+            tokens_per_minute=1_000_000_000,
+            reserved_output_tokens=0,
+            distributed_rate_limit=False,
+            api_concurrency=100,
+            chunk_queue_size=300,
+            max_retries=0,
+            retry_backoff=0,
+            request_timeout=10,
+        ),
+        extraction=SimpleNamespace(
+            stage_version="extract:v1", passes=["general"], code_version="x"
+        ),
+        llm=SimpleNamespace(provider="test", model="test-model", temperature=0.0),
+    )
+    repository = AsyncMock()
+    repository.prepare_chunks.return_value = {}
+    repository.complete_extraction.return_value = uuid4()
+    active = 0
+    peak = 0
+    reached_one_hundred = asyncio.Event()
+    release = asyncio.Event()
+
+    async def extract_document(**_: object) -> LLMResponse:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if peak == 100:
+            reached_one_hundred.set()
+        await release.wait()
+        active -= 1
+        return LLMResponse(output=ExtractionOutput(), raw_output={})
+
+    llm = AsyncMock()
+    llm.extract_document.side_effect = extract_document
+    prompts = SimpleNamespace(
+        extraction=Mock(
+            return_value=PromptDefinition(
+                name="test", version="v1", system_prompt="system", user_template="{document}"
+            )
+        )
+    )
+    extractor = BronzeExtractor(settings=settings, repository=repository, llm=llm, prompts=prompts)
+    job = ClaimedJob(
+        job_id=uuid4(),
+        document_id="doc-100",
+        stage="extract:general",
+        stage_version="extract:v1|chunk=1,overlap=0",
+        retry_count=0,
+        content="x" * 120,
+        content_hash="0" * 64,
+        source_type="research",
+    )
+
+    processing = asyncio.create_task(extractor._process(job, chunk_size=1))
+    await asyncio.wait_for(reached_one_hundred.wait(), timeout=3)
+    assert peak == 100
+    release.set()
+    result = await processing
+
+    assert result.documents_successful == 1
+    assert result.requests == 120
 
 
 def test_chunk_settings_are_part_of_resumable_stage_version() -> None:

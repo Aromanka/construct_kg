@@ -6,6 +6,8 @@ def test_required_postgresql_tables_are_declared() -> None:
         "documents",
         "document_revisions",
         "processing_jobs",
+        "extraction_chunk_jobs",
+        "api_rate_limits",
         "extraction_runs",
         "entity_mentions",
         "entities",

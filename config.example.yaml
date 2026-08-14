@@ -7,12 +7,21 @@ llm:
   timeout: 120
 
 processing:
-  max_concurrency: 8
+  job_claimers: 8
+  job_concurrency: 100
+  api_concurrency: 100
+  chunk_queue_size: 300
+  database_pool_size: 20
+  database_max_overflow: 20
   requests_per_minute: 100
   tokens_per_minute: 1000000
+  reserved_output_tokens: 4096
+  distributed_rate_limit: true
   max_retries: 4
   request_timeout: 120
   retry_backoff: 2.0
+  job_lease_seconds: 900
+  heartbeat_interval: 30
 
 database:
   host: localhost
