@@ -30,25 +30,27 @@ mentions, raw assertions, qualifiers, evidence, model output, and provenance.
 
 ## Setup
 
-Python 3.10+ and PostgreSQL are required. The base installation intentionally declares only the
-five direct runtime libraries needed by the core PostgreSQL and LLM pipeline.
+Python 3.10+ in a Conda environment and PostgreSQL are required. The base installation
+intentionally declares only the five direct runtime libraries needed by the core PostgreSQL and
+LLM pipeline.
 
 ```bash
-python -m venv .venv
-.venv/Scripts/activate
-pip install -e .
-copy config.example.yaml config.yaml
+conda create -n medical-kg python=3.10 -y
+conda activate medical-kg
+python -m pip install -e .
 ```
+
+Copy `config.example.yaml` to `config.yaml` before running the project.
 
 Set `DEEPSEEK_API_KEY` and `POSTGRES_PASSWORD`, or replace their environment placeholders in the
 local `config.yaml`. That file is ignored by Git. Optional features are installed only when needed:
 
 ```bash
 # PDF ingestion
-pip install -e ".[pdf]"
+python -m pip install -e ".[pdf]"
 
 # Tests and linting
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 ```
 
 `requirements.txt` contains only core runtime dependencies. The CLI and retry behavior use the
@@ -107,7 +109,8 @@ After the database has been initialized, use this command to ingest every docume
 python -m medical_kg run "data/knowledge_base" --source-type guidelines --chunk-size 12000 --chunk-overlap 500 --config config.yaml
 ```
 
-PDF ingestion requires `pip install -e ".[pdf]"`. PostgreSQL must be running and the database
+PDF ingestion requires `python -m pip install -e ".[pdf]"` in the active Conda environment.
+PostgreSQL must be running and the database
 settings in `config.yaml` must be valid before extraction.
 The compatible client explicitly uses the operating system's trusted CA context, so an unrelated
 or stale `SSL_CERT_FILE` override is not read during HTTP client initialization.
@@ -153,7 +156,8 @@ PostgreSQL is authoritative. Prompt files live in `prompts/`, runtime configurat
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+conda activate medical-kg
+python -m pip install -e ".[dev]"
 pytest
 ruff check .
 ```

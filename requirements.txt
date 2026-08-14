@@ -6,4 +6,5 @@ PyYAML>=6.0,<7
 SQLAlchemy>=2.0.31,<3
 
 # Optional PDF and development dependencies are intentionally excluded.
-# Install them only when needed with: pip install -e ".[pdf]" or ".[dev]"
+# In the active Conda environment, install them only when needed with:
+# python -m pip install -e ".[pdf]" or ".[dev]"
