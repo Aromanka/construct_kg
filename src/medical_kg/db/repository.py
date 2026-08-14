@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -68,19 +69,21 @@ class KnowledgeRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
         self.sessions = async_sessionmaker(engine, expire_on_commit=False)
+        self._write_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def _write_session(self) -> AsyncIterator[AsyncSession]:
         """Serialize SQLite writers and make read-modify-write operations atomic."""
-        async with self.sessions() as session:
-            await session.execute(text("BEGIN IMMEDIATE"))
-            try:
-                yield session
-            except BaseException:
-                await session.rollback()
-                raise
-            else:
-                await session.commit()
+        async with self._write_lock:
+            async with self.sessions() as session:
+                await session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    yield session
+                except BaseException:
+                    await session.rollback()
+                    raise
+                else:
+                    await session.commit()
 
     async def create_schema(self) -> None:
         async with self.engine.begin() as connection:

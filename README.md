@@ -21,7 +21,8 @@ mentions, raw assertions, qualifiers, evidence, model output, and provenance.
   qualifiers, and confidence bounds.
 - SQLite persistence for all Landing, Bronze, Silver, and Gold objects described by the
   architecture specification.
-- Atomic job claiming with SQLite immediate transactions, independent failures, bounded
+- Atomic job claiming with process-local asynchronous write serialization and SQLite immediate
+  transactions, independent failures, bounded
   concurrency, request/token rate limiting, bounded retries, and resume/retry commands.
 - Exact source-evidence validation and deterministic mention offsets where possible.
 - Structured logs and run-level request/token/success statistics.
@@ -156,10 +157,11 @@ distributed_rate_limit: true
 
 Concurrency is only an upper bound. The shared SQLite rate limiter smooths requests across
 processes using the same local database file, so actual in-flight requests also depend on provider
-RPM/TPM limits and API latency. WAL mode and a busy timeout are enabled automatically, but SQLite
-still has one writer at a time; keep the database on a local disk rather than NFS or another network
-filesystem. After upgrading an existing checkout, run `python -m medical_kg init-db --config
-config.yaml` once to create the current schema.
+RPM/TPM limits and API latency. Writes are serialized before they acquire a pooled connection;
+WAL mode and a busy timeout handle readers and competing processes. SQLite still has one writer at
+a time, so keep the database on a local disk rather than NFS or another network filesystem. After
+upgrading an existing checkout, run `python -m medical_kg init-db --config config.yaml` once to
+create the current schema.
 
 ### Inspecting an interrupted build
 

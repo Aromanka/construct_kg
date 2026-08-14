@@ -104,3 +104,42 @@ async def test_sqlite_repository_lifecycle(tmp_path: Path) -> None:
         await engine.dispose()
 
     assert database.is_file()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_writers_wait_before_checking_out_another_connection(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "serialized.sqlite3"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database.as_posix()}",
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.05,
+    )
+    repository = KnowledgeRepository(engine)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_writer() -> None:
+        async with repository._write_session():
+            first_entered.set()
+            await release_first.wait()
+
+    async def second_writer() -> None:
+        async with repository._write_session():
+            second_entered.set()
+
+    first = asyncio.create_task(first_writer())
+    await first_entered.wait()
+    second = asyncio.create_task(second_writer())
+    await asyncio.sleep(0.1)
+
+    assert repository._write_lock.locked()
+    assert not second_entered.is_set()
+
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert second_entered.is_set()
+    await engine.dispose()
