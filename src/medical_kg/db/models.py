@@ -118,6 +118,10 @@ class ExtractionRun(Base, TimestampMixin):
     temperature: Mapped[float] = mapped_column(Float, nullable=False)
     code_version: Mapped[str] = mapped_column(String(128), nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Store the provider response exactly once per extraction pass.
+    raw_llm_output: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
 
 
 class ProcessingJob(Base):
@@ -317,7 +321,6 @@ class RawAssertion(Base, TimestampMixin):
     qualifiers: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     negated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     speculative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    raw_llm_output: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     evidence_validated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     validation_error: Mapped[str | None] = mapped_column(Text)
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)

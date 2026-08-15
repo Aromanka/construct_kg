@@ -393,6 +393,7 @@ class KnowledgeRepository:
                 document_id=job.document_id,
                 content_hash=job.content_hash,
                 source_type=job.source_type,
+                raw_llm_output=raw_output,
             )
             session.add(run)
             await session.flush()
@@ -448,7 +449,6 @@ class KnowledgeRepository:
                         qualifiers=assertion.qualifiers.model_dump(mode="json", exclude_none=True),
                         negated=assertion.negated,
                         speculative=assertion.speculative,
-                        raw_llm_output=raw_output,
                         evidence_validated=evidence_valid,
                         validation_error=(
                             None if evidence_valid else "Evidence is not exact source text"

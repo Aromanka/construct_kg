@@ -196,6 +196,13 @@ Local papers
 The SQLite file is authoritative. Prompt files live in `prompts/`, runtime configuration in
 `config.example.yaml`, and the canonical relation vocabulary in `config/relations.yaml`.
 
+### SQLite raw-output storage
+
+The complete provider response is stored once on its `extraction_runs` row. Individual
+`raw_assertions` retain only the structured assertion, evidence, qualifiers, validation state, and
+provenance; they do not repeat the complete response. Chunk checkpoints keep their validated and
+raw result so interrupted extraction can resume without another API request.
+
 ## Development
 
 ```bash
@@ -215,3 +222,31 @@ python -m medical_kg status --config config.yaml
 python -m medical_kg stats --config config.yaml
 python -m medical_kg run "data/knowledge_base" --source-type guidelines --chunk-size 12000 --chunk-overlap 500 --config config.yaml
 ```
+
+## Neo4j 导入与 Web 浏览
+
+`src/utils/sqlite_to_neo4j.py` 会完整保留 SQLite 的表、行、列和外键，并将 Bronze
+`raw_assertions` 及 Gold `assertions` 额外投影为可直接浏览的知识关系。先启动本地 Neo4j，
+然后设置密码并运行一个命令：
+
+```powershell
+$env:NEO4J_PASSWORD = "你的 Neo4j 密码"
+python src/utils/sqlite_to_neo4j.py all --clear --open-browser
+```
+
+默认读取 `data/medical_kg.sqlite3`，连接 `bolt://localhost:7687`，并在
+`http://127.0.0.1:8000` 提供无需额外前端依赖的可视化页面。常用的独立操作如下：
+
+```powershell
+# 不连接 Neo4j，只查看将要导入的表和行数
+python src/utils/sqlite_to_neo4j.py inspect
+
+# 仅导入（重复执行会按 SQL 主键更新，不会产生重复节点）
+python src/utils/sqlite_to_neo4j.py import --clear
+
+# 仅启动 Web 页面
+python src/utils/sqlite_to_neo4j.py serve --port 8000
+```
+
+连接参数也可用 `--uri`、`--user`、`--password`、`--database` 指定。`--clear` 只删除
+带 `SQLRow` 标签、即由此脚本导入的节点，不影响 Neo4j 中的其他数据。

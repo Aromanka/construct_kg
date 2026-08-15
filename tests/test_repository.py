@@ -2,12 +2,14 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from medical_kg.config import DatabaseSettings
-from medical_kg.db.models import Base
-from medical_kg.db.repository import KnowledgeRepository
+from medical_kg.db.models import Base, ExtractionRun, RawAssertion
+from medical_kg.db.repository import ExtractionRunSpec, KnowledgeRepository
 from medical_kg.landing.chunking import chunk_document
+from medical_kg.models.assertion import ExtractionOutput
 from medical_kg.models.document import DocumentInput
 
 
@@ -143,3 +145,75 @@ async def test_sqlite_writers_wait_before_checking_out_another_connection(
     await asyncio.gather(first, second)
     assert second_entered.is_set()
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_extraction_stores_raw_response_once_per_run(tmp_path: Path) -> None:
+    database = tmp_path / "deduplicated.sqlite3"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database.as_posix()}")
+    repository = KnowledgeRepository(engine)
+    raw_output = {"provider_response": "large response" * 1000}
+    try:
+        await repository.create_schema()
+        document = DocumentInput.from_content(
+            document_id="doc-dedup",
+            file_path=tmp_path / "doc.txt",
+            content="A affects B. A treats C.",
+        )
+        await repository.register_document(document)
+        await repository.enqueue_jobs(
+            document_ids=[document.document_id],
+            stages=["extract:general"],
+            stage_version="extract:v1",
+        )
+        job = await repository.claim_job(
+            stages=["extract:general"],
+            stage_version="extract:v1",
+            worker_id="test-worker",
+        )
+        assert job is not None
+        output = ExtractionOutput.model_validate(
+            {
+                "assertions": [
+                    {
+                        "subject": {"mention": "A", "entity_type": "GENE"},
+                        "object": {"mention": "B", "entity_type": "PROTEIN"},
+                        "detailed_relation": "affects",
+                        "evidence_text": "A affects B.",
+                        "llm_confidence": 0.9,
+                    },
+                    {
+                        "subject": {"mention": "A", "entity_type": "GENE"},
+                        "object": {"mention": "C", "entity_type": "DISEASE"},
+                        "detailed_relation": "treats",
+                        "evidence_text": "A treats C.",
+                        "llm_confidence": 0.8,
+                    },
+                ]
+            }
+        )
+        await repository.complete_extraction(
+            job=job,
+            run_spec=ExtractionRunSpec(
+                model_provider="test",
+                model_name="test-model",
+                prompt_name="test-prompt",
+                prompt_version="v1",
+                pass_name="general",
+                temperature=0.0,
+                code_version="test",
+            ),
+            output=output,
+            raw_output=raw_output,
+        )
+
+        async with repository.sessions() as session:
+            run_outputs = list(await session.scalars(select(ExtractionRun.raw_llm_output)))
+            assertion_count = await session.scalar(
+                select(func.count()).select_from(RawAssertion)
+            )
+        assert run_outputs == [raw_output]
+        assert assertion_count == 2
+        assert "raw_llm_output" not in RawAssertion.__table__.columns
+    finally:
+        await engine.dispose()
