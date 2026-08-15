@@ -6,7 +6,6 @@ import argparse
 from pathlib import Path
 
 import pyarrow.parquet as pq
-
 from optimus_diabetes import DEFAULT_KG_ROOT, EDGE_TYPES, validate_kg_root
 
 

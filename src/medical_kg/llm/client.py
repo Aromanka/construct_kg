@@ -11,6 +11,10 @@ from pydantic import ValidationError
 from medical_kg.config import AppSettings
 from medical_kg.llm.base import LLMClient, LLMResponse
 from medical_kg.models.assertion import ExtractionOutput
+from medical_kg.silver.schemas import (
+    EntityCanonicalizationDecision,
+    RelationCanonicalizationDecision,
+)
 
 
 class StructuredOutputValidationError(ValueError):
@@ -149,6 +153,54 @@ class CompatibleAPIClient(LLMClient):
                 "structured_output_corrected": False,
             },
         )
+
+    async def canonicalize_entity(
+        self, *, system_prompt: str, user_prompt: str, temperature: float
+    ) -> EntityCanonicalizationDecision:
+        raw = await self._structured_decision(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            schema=EntityCanonicalizationDecision.model_json_schema(),
+            temperature=temperature,
+        )
+        return EntityCanonicalizationDecision.model_validate(raw)
+
+    async def canonicalize_relation(
+        self, *, system_prompt: str, user_prompt: str, temperature: float
+    ) -> RelationCanonicalizationDecision:
+        raw = await self._structured_decision(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            schema=RelationCanonicalizationDecision.model_json_schema(),
+            temperature=temperature,
+        )
+        return RelationCanonicalizationDecision.model_validate(raw)
+
+    async def _structured_decision(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: dict[str, Any],
+        temperature: float,
+    ) -> Any:
+        raw = await self._completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"{system_prompt}\nReturn only valid JSON.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{user_prompt}\n\nJSON SCHEMA:\n"
+                        f"{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
+                    ),
+                },
+            ],
+            temperature=temperature,
+        )
+        return self._decode_response_content(raw)
 
     async def _completion(
         self, *, messages: list[dict[str, str]], temperature: float

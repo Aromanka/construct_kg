@@ -1,8 +1,6 @@
 from pathlib import Path
 
-import pytest
-
-from medical_kg.cli import build_parser, main
+from medical_kg.cli import build_parser
 from medical_kg.config import ProcessingSettings
 
 
@@ -26,12 +24,14 @@ def test_run_parser_accepts_lightweight_module_command_options() -> None:
     assert args.chunk_overlap == 500
 
 
-def test_canonicalize_command_does_not_require_runtime_services(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    assert main(["canonicalize"]) == 0
-    captured = capsys.readouterr()
-    assert "intentionally gated" in captured.out
+def test_canonicalize_parser_accepts_silver_options() -> None:
+    args = build_parser().parse_args(
+        ["canonicalize", "--semantic", "--document-id", "doc-1"]
+    )
+
+    assert args.command == "canonicalize"
+    assert args.semantic is True
+    assert args.document_id == "doc-1"
 
 
 def test_stats_parser_accepts_config() -> None:

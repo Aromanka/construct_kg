@@ -294,6 +294,38 @@ class EntityExternalId(Base, TimestampMixin):
     )
 
 
+class EntityResolution(Base, TimestampMixin):
+    """Auditable Silver mapping from an immutable mention to a canonical entity."""
+
+    __tablename__ = "entity_resolutions"
+    resolution_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    mention_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("entity_mentions.mention_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    entity_id: Mapped[str] = mapped_column(
+        ForeignKey("entities.entity_id", ondelete="CASCADE"), nullable=False
+    )
+    resolution_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    candidate_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="ck_resolution_confidence"
+        ),
+        CheckConstraint(
+            "json_type(candidate_snapshot) = 'array'",
+            name="ck_resolution_candidates_array",
+        ),
+        Index("ix_entity_resolutions_entity", "entity_id"),
+    )
+
+
 class RawAssertion(Base, TimestampMixin):
     __tablename__ = "raw_assertions"
     raw_assertion_id: Mapped[uuid.UUID] = mapped_column(
@@ -367,6 +399,40 @@ class Assertion(Base, UpdatedTimestampMixin):
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     __table_args__ = (
         CheckConstraint("json_type(sources) = 'array'", name="ck_assertion_sources_array"),
+    )
+
+
+class AssertionEvidence(Base, TimestampMixin):
+    """Many-to-one Gold support records without duplicating canonical facts."""
+
+    __tablename__ = "assertion_evidence"
+    assertion_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assertion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assertions.assertion_id", ondelete="CASCADE"), nullable=False
+    )
+    raw_assertion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("raw_assertions.raw_assertion_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    llm_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    __table_args__ = (
+        CheckConstraint(
+            "llm_confidence >= 0 AND llm_confidence <= 1",
+            name="ck_assertion_evidence_confidence",
+        ),
+        CheckConstraint(
+            "json_type(sources) = 'array'", name="ck_assertion_evidence_sources_array"
+        ),
+        Index("ix_assertion_evidence_assertion", "assertion_id"),
+        Index("ix_assertion_evidence_document", "document_id"),
     )
 
 

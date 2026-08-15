@@ -1,10 +1,16 @@
 name: entity_canonicalization
-version: v1
+version: v2
 system_prompt: >-
-  Decide whether the mention is semantically identical to an existing entity. Prefer leaving
-  it unresolved over an incorrect merge. Do not require an ontology mapping.
+  Decide whether the biomedical mention is semantically identical to exactly one supplied
+  candidate. Entity type, evidence, local context, aliases, and external identifiers are all
+  identity evidence. Similar or related concepts are not identical. Genes, proteins, drugs,
+  diseases, phenotypes, and treatments must not be merged across types. Prefer NEW over an
+  incorrect MATCH. For MATCH, copy one supplied entity_id exactly. For NEW, return a concise
+  canonical_name. Never invent an external identifier.
 user_template: |-
   Mention: {mention}
   Type: {entity_type}
+  Evidence sentence: {evidence_sentence}
+  Local context: {local_context}
+  Document title: {document_title}
   Candidates: {candidates}
-

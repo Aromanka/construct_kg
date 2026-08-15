@@ -234,3 +234,47 @@ async def test_compatible_client_keeps_other_detail_strict_after_correction() ->
     assert captured.value.input_tokens == 6
     assert captured.value.output_tokens == 4
     assert "entity_type_detail is required" in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_compatible_client_validates_canonicalization_decisions() -> None:
+    responses = iter(
+        [
+            {
+                "decision": "MATCH",
+                "entity_id": "ENT_T2D",
+                "confidence": 0.97,
+            },
+            {"canonical_relation": "treats", "confidence": 0.93},
+        ]
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps(next(responses))}}
+                ]
+            },
+        )
+
+    client = CompatibleAPIClient(
+        api_key="test-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        entity = await client.canonicalize_entity(
+            system_prompt="Resolve.", user_prompt="Mention.", temperature=0.0
+        )
+        relation = await client.canonicalize_relation(
+            system_prompt="Normalize.", user_prompt="Relation.", temperature=0.0
+        )
+    finally:
+        await client.aclose()
+
+    assert entity.entity_id == "ENT_T2D"
+    assert entity.confidence == 0.97
+    assert relation.canonical_relation == "treats"

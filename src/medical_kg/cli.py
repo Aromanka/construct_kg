@@ -19,6 +19,7 @@ from medical_kg.logging import configure_logging
 from medical_kg.models.source import SourceType
 from medical_kg.pipeline.runner import PipelineRunner
 from medical_kg.prompts import PromptRegistry, load_relation_vocabulary
+from medical_kg.silver.canonicalization import CanonicalizationPipeline
 from medical_kg.utils.statistics import collect_knowledge_statistics
 
 
@@ -91,6 +92,7 @@ async def _run_command(args: argparse.Namespace) -> Any:
     settings = _settings(args.config)
     repository = _repository(settings)
     runner: PipelineRunner | None = None
+    canonicalization_llm = None
     try:
         if args.command == "init-db":
             await repository.create_schema()
@@ -140,11 +142,29 @@ async def _run_command(args: argparse.Namespace) -> Any:
         if args.command == "stats":
             return await collect_knowledge_statistics(repository)
 
+        if args.command == "canonicalize":
+            semantic = args.semantic or settings.canonicalization.semantic
+            canonicalization_llm = create_llm_client(settings) if semantic else None
+            pipeline = CanonicalizationPipeline(
+                repository=repository,
+                vocabulary=load_relation_vocabulary(
+                    settings.relations.vocabulary_file
+                ),
+                prompts=PromptRegistry(settings.prompts.directory),
+                llm=canonicalization_llm,
+                semantic=semantic,
+                confidence_threshold=settings.canonicalization.confidence_threshold,
+                candidate_top_k=settings.canonicalization.candidate_top_k,
+            )
+            return await pipeline.run(document_id=args.document_id)
+
         raise ValueError(f"Unknown command: {args.command}")
     finally:
         try:
             if runner is not None:
                 await runner.extractor.llm.aclose()
+            if canonicalization_llm is not None:
+                await canonicalization_llm.aclose()
         finally:
             await repository.engine.dispose()
 
@@ -202,18 +222,20 @@ def build_parser() -> argparse.ArgumentParser:
     stats = commands.add_parser("stats", help="Show read-only knowledge build statistics")
     _add_config(stats)
 
-    commands.add_parser("canonicalize", help="Describe the gated Phase II operation")
+    canonicalize = commands.add_parser(
+        "canonicalize", help="Resolve mentions and materialize the canonical graph"
+    )
+    canonicalize.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Use the configured LLM for ambiguous entity/relation candidates",
+    )
+    canonicalize.add_argument("--document-id")
+    _add_config(canonicalize)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "canonicalize":
-        print(
-            "Canonicalization is scaffolded but intentionally gated until Bronze extraction is "
-            "validated. Raw assertions are never modified; implement semantic resolvers before "
-            "enabling."
-        )
-        return 0
     _print(_execute(_run_command(args)))
     return 0

@@ -1,12 +1,14 @@
 name: relation_canonicalization
-version: v1
+version: v2
 system_prompt: >-
   Map the detailed relation to one supplied canonical relation without changing its meaning.
-  Return OTHER when none is faithful.
+  Use the subject, object, exact evidence, qualifiers, direction, negation, and speculation.
+  Copy one supplied canonical relation exactly. Return OTHER when none is faithful; do not choose
+  a broader relation merely to avoid OTHER.
 user_template: |-
   Subject: {subject}
   Detailed relation: {detailed_relation}
   Object: {object}
+  Evidence sentence: {evidence_sentence}
   Qualifiers: {qualifiers}
   Candidates: {candidates}
-

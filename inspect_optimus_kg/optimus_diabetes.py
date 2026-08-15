@@ -13,12 +13,12 @@ import csv
 import json
 import re
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 
 DEFAULT_KG_ROOT = Path(r"E:\code\data\knowledge\med\OptimusKG")
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "output" / "diabetes_demo"

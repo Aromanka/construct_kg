@@ -79,6 +79,12 @@ class RelationSettings(BaseModel):
     vocabulary_file: Path = Path("config/relations.yaml")
 
 
+class CanonicalizationSettings(BaseModel):
+    semantic: bool = False
+    confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    candidate_top_k: int = Field(default=8, ge=1, le=50)
+
+
 class PromptSettings(BaseModel):
     directory: Path = Path("prompts")
 
@@ -93,6 +99,9 @@ class AppSettings(BaseModel):
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)
     database: DatabaseSettings
     extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
+    canonicalization: CanonicalizationSettings = Field(
+        default_factory=CanonicalizationSettings
+    )
     relations: RelationSettings = Field(default_factory=RelationSettings)
     prompts: PromptSettings = Field(default_factory=PromptSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

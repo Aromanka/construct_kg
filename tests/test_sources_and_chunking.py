@@ -351,12 +351,12 @@ def test_chunk_settings_are_part_of_resumable_stage_version() -> None:
     )
 
 
-def test_v2_extraction_prompts_state_strict_output_rules() -> None:
+def test_v3_extraction_prompts_state_strict_output_rules() -> None:
     registry = PromptRegistry(Path(__file__).parents[1] / "prompts")
 
     for pass_name in ("general", "molecular", "clinical"):
         prompt = registry.extraction(pass_name)
-        assert prompt.version == "v2"
+        assert prompt.version == "v3"
         assert "entity_type_detail" in prompt.system_prompt
         assert "never return null" in prompt.system_prompt
 

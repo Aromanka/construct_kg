@@ -8,10 +8,12 @@ from sqlalchemy import func, select
 
 from medical_kg.db.models import (
     Assertion,
+    AssertionEvidence,
     Document,
     DocumentRevision,
     Entity,
     EntityMention,
+    EntityResolution,
     ExtractionRun,
     InvalidRecord,
     ProcessingJob,
@@ -28,6 +30,7 @@ def assemble_knowledge_statistics(
     job_counts: Sequence[tuple[str, str, str, int]],
     pass_counts: Sequence[tuple[str, int]],
     entity_type_counts: Sequence[tuple[str, int]],
+    graph_quality: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the stable, JSON-friendly representation used by the CLI."""
 
@@ -76,6 +79,8 @@ def assemble_knowledge_statistics(
             "entities": int(totals["entities"]),
             "assertions": int(totals["assertions"]),
             "relation_types": int(totals["relation_types"]),
+            "resolved_mentions": int(totals.get("resolved_mentions", 0)),
+            "evidence_links": int(totals.get("evidence_links", 0)),
         },
         "quality": {
             "invalid_records": int(totals["invalid_records"]),
@@ -83,6 +88,74 @@ def assemble_knowledge_statistics(
                 round(evidence_validated / raw_assertions, 4) if raw_assertions else None
             ),
         },
+        "graph_quality": dict(graph_quality or {}),
+    }
+
+
+def compute_graph_quality(
+    *,
+    edges: Sequence[tuple[str, str, str]],
+    mention_count: int,
+    entity_count: int,
+    entity_documents: Sequence[tuple[str, str]],
+    evidence_count: int,
+) -> dict[str, Any]:
+    """Compute connectivity metrics without rewarding unsafe entity merges."""
+
+    adjacency: defaultdict[str, set[str]] = defaultdict(set)
+    degree: defaultdict[str, int] = defaultdict(int)
+    other_count = 0
+    for subject, object_, relation in edges:
+        adjacency[subject].add(object_)
+        adjacency[object_].add(subject)
+        degree[subject] += 1
+        degree[object_] += 1
+        other_count += relation.casefold() == "other"
+
+    nodes = set(adjacency)
+    largest = 0
+    unseen = set(nodes)
+    while unseen:
+        seed = unseen.pop()
+        stack = [seed]
+        size = 0
+        while stack:
+            current = stack.pop()
+            size += 1
+            neighbours = adjacency[current] & unseen
+            unseen.difference_update(neighbours)
+            stack.extend(neighbours)
+        largest = max(largest, size)
+
+    singleton_edges = sum(
+        degree[subject] == 1 and degree[object_] == 1 for subject, object_, _ in edges
+    )
+    documents_by_entity: defaultdict[str, set[str]] = defaultdict(set)
+    for entity_id, document_id in entity_documents:
+        documents_by_entity[entity_id].add(document_id)
+    reused = sum(len(documents) >= 2 for documents in documents_by_entity.values())
+    edge_count = len(edges)
+    return {
+        "singleton_edge_ratio": round(singleton_edges / edge_count, 4)
+        if edge_count
+        else None,
+        "largest_connected_component_ratio": round(largest / entity_count, 4)
+        if entity_count
+        else None,
+        "canonical_compression_ratio": round(mention_count / entity_count, 4)
+        if entity_count
+        else None,
+        "cross_document_reuse_rate": round(reused / entity_count, 4)
+        if entity_count
+        else None,
+        "relation_other_ratio": round(other_count / edge_count, 4)
+        if edge_count
+        else None,
+        "duplicate_canonical_assertion_ratio": round(
+            max(0, evidence_count - edge_count) / evidence_count, 4
+        )
+        if evidence_count
+        else None,
     }
 
 
@@ -118,6 +191,8 @@ async def collect_knowledge_statistics(
         count(Entity).label("entities"),
         count(Assertion).label("assertions"),
         count(RelationType).label("relation_types"),
+        count(EntityResolution).label("resolved_mentions"),
+        count(AssertionEvidence).label("evidence_links"),
         count(InvalidRecord).label("invalid_records"),
     )
     source_statement = (
@@ -145,6 +220,26 @@ async def collect_knowledge_statistics(
         .group_by(EntityMention.entity_type)
         .order_by(EntityMention.entity_type)
     )
+    edge_statement = (
+        select(
+            Assertion.subject_entity_id,
+            Assertion.object_entity_id,
+            RelationType.canonical_name,
+        )
+        .join(
+            RelationType,
+            RelationType.relation_id == Assertion.canonical_relation_id,
+        )
+        .order_by(Assertion.assertion_id)
+    )
+    entity_document_statement = (
+        select(EntityResolution.entity_id, EntityMention.document_id)
+        .join(
+            EntityMention,
+            EntityMention.mention_id == EntityResolution.mention_id,
+        )
+        .distinct()
+    )
 
     async with repository.sessions() as session:
         totals = dict((await session.execute(totals_statement)).mappings().one())
@@ -152,6 +247,18 @@ async def collect_knowledge_statistics(
         job_counts = list((await session.execute(job_statement)).all())
         pass_counts = list((await session.execute(pass_statement)).all())
         entity_type_counts = list((await session.execute(entity_type_statement)).all())
+        edges = list((await session.execute(edge_statement)).all())
+        entity_documents = list(
+            (await session.execute(entity_document_statement)).all()
+        )
+
+    graph_quality = compute_graph_quality(
+        edges=edges,
+        mention_count=int(totals["resolved_mentions"]),
+        entity_count=int(totals["entities"]),
+        entity_documents=entity_documents,
+        evidence_count=int(totals["evidence_links"]),
+    )
 
     return assemble_knowledge_statistics(
         totals=totals,
@@ -159,4 +266,5 @@ async def collect_knowledge_statistics(
         job_counts=job_counts,
         pass_counts=pass_counts,
         entity_type_counts=entity_type_counts,
+        graph_quality=graph_quality,
     )

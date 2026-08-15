@@ -1,9 +1,9 @@
 # Medical Literature Knowledge Graph
 
 A maintainable, evidence-aware Python pipeline that converts local biomedical papers into a
-resumable SQLite knowledge base. The current implementation deliberately focuses on the
-Phase I Bronze pipeline: reliable full-document extraction and faithful persistence of entity
-mentions, raw assertions, qualifiers, evidence, model output, and provenance.
+resumable SQLite knowledge base. The implementation preserves a faithful Phase I Bronze layer,
+then resolves reusable biomedical entities and relations into an auditable Silver/Gold graph with
+multi-document evidence aggregation.
 
 ## What is implemented
 
@@ -28,8 +28,14 @@ mentions, raw assertions, qualifiers, evidence, model output, and provenance.
   concurrency, request/token rate limiting, bounded retries, and resume/retry commands.
 - Exact source-evidence validation and deterministic mention offsets where possible.
 - Structured logs and run-level request/token/success statistics.
-- Conservative Silver/Gold extension points. Canonicalization is intentionally gated until the
-  Bronze output has been evaluated; it never overwrites Bronze data.
+- Executable Silver entity resolution with exact normalized aliases, type-scoped biomedical
+  synonyms, abbreviation matching, lexical top-k candidate retrieval, and an optional contextual
+  LLM decision for ambiguous candidates. Lexical similarity alone never merges entities.
+- Deterministic relation canonicalization with optional LLM fallback to the controlled vocabulary.
+- Gold assertion identity based on canonical subject, relation, object, semantic qualifiers,
+  negation, and speculation; repeated facts aggregate into separate evidence records.
+- Graph-quality metrics for singleton edges, largest connected component, canonical compression,
+  cross-document reuse, `OTHER` relations, and duplicate fact support.
 
 ## Setup
 
@@ -109,6 +115,7 @@ python -m medical_kg retry-failed
 python -m medical_kg status
 python -m medical_kg stats
 python -m medical_kg canonicalize
+python -m medical_kg canonicalize --semantic
 ```
 
 Commands are executed through the Python module entry point; no generated `.exe` launcher is
@@ -169,18 +176,44 @@ create the current schema.
 ### Inspecting an interrupted build
 
 The statistics command is read-only and reports committed documents, job states, completed
-extraction passes, entity mentions, raw assertions, evidence validation, and canonical graph
-counts:
+extraction passes, entity mentions, raw assertions, evidence validation, canonical graph counts,
+and graph-quality metrics:
 
 ```powershell
 python -m medical_kg stats --config config.yaml
 ```
 
-For the current Phase I pipeline, `bronze_knowledge.raw_assertions` is the main count of extracted
-knowledge. `canonical_knowledge.entities` and `canonical_knowledge.assertions` can remain zero
-until canonicalization is enabled. A job left as `RUNNING` after interruption is shown as-is; this
-inspection command never changes or resumes it. Only completed extraction passes are committed, so
-an interrupted in-flight pass is not included in the knowledge counts.
+`bronze_knowledge.raw_assertions` measures extracted surface assertions;
+`canonical_knowledge.assertions` measures deduplicated facts and
+`canonical_knowledge.evidence_links` measures their supporting raw assertions. A job left as
+`RUNNING` after interruption is shown as-is; this inspection command never changes or resumes it.
+Only completed extraction passes are committed, so an interrupted in-flight pass is not included
+in the knowledge counts.
+
+### Silver/Gold canonicalization
+
+Run deterministic, high-precision canonicalization after Bronze extraction:
+
+```powershell
+python -m medical_kg canonicalize --config config.yaml
+```
+
+This mode merges only an unambiguous exact alias, type-compatible abbreviation, or curated
+high-precision synonym. Otherwise it creates a new canonical entity, because a false medical merge
+is more harmful than a false split. It never modifies `entity_mentions` or `raw_assertions`.
+
+To let the configured LLM decide among retrieved candidates and map relations that remain `OTHER`,
+opt in explicitly:
+
+```powershell
+python -m medical_kg canonicalize --semantic --config config.yaml
+```
+
+The LLM receives the mention type, exact evidence sentence, local context, document title,
+candidate names, aliases, types, and available external IDs. A `MATCH` must copy a supplied ID and
+meet `canonicalization.confidence_threshold`; otherwise a new entity is retained. Re-running the
+command is idempotent. `--document-id` can limit new work while still retrieving candidates from
+the full canonical entity index.
 
 ## Architecture
 
@@ -189,8 +222,9 @@ Local papers
   -> documents + processing_jobs
   -> full-document LLM passes
   -> entity_mentions + raw_assertions + evidence + extraction_runs
-  -> [Phase II] entities + relation_types + canonical assertions
-  -> [Phase III] ontology enrichment and graph/export projections
+  -> entity_resolutions + entities + aliases
+  -> relation normalization + canonical assertions + assertion_evidence
+  -> [Future] embedding/ontology candidate providers and hierarchy enrichment
 ```
 
 The SQLite file is authoritative. Prompt files live in `prompts/`, runtime configuration in
@@ -226,8 +260,16 @@ python -m medical_kg run "data/knowledge_base" --source-type guidelines --chunk-
 ## Neo4j 导入与 Web 浏览
 
 `src/utils/sqlite_to_neo4j.py` 会完整保留 SQLite 的表、行、列和外键，并将 Bronze
-`raw_assertions` 及 Gold `assertions` 额外投影为可直接浏览的知识关系。先启动本地 Neo4j，
-然后设置密码并运行一个命令：
+`raw_assertions` 及 Gold `assertions` 额外投影为可直接浏览的知识关系。Web 页面默认只显示
+Gold 规范化图；Bronze 原始图作为独立诊断视图保留，不应据此判断最终 KG 连通性。Gold
+边包含聚合后的 `support_count`。先运行 `canonicalize`，再启动本地 Neo4j。
+如果 Neo4j 已禁用身份验证，运行：
+
+```powershell
+python src/utils/sqlite_to_neo4j.py all --no-auth --clear --open-browser
+```
+
+如果 Neo4j 启用了身份验证，则设置密码后运行：
 
 ```powershell
 $env:NEO4J_PASSWORD = "你的 Neo4j 密码"
@@ -248,5 +290,6 @@ python src/utils/sqlite_to_neo4j.py import --clear
 python src/utils/sqlite_to_neo4j.py serve --port 8000
 ```
 
-连接参数也可用 `--uri`、`--user`、`--password`、`--database` 指定。`--clear` 只删除
-带 `SQLRow` 标签、即由此脚本导入的节点，不影响 Neo4j 中的其他数据。
+连接参数也可用 `--uri`、`--user`、`--password`、`--database` 指定。`--no-auth` 与密码
+参数互斥。`--clear` 只删除带 `SQLRow` 标签、即由此脚本导入的节点，不影响 Neo4j 中的
+其他数据。

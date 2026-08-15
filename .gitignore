@@ -146,5 +146,6 @@ outputs
 config.yaml
 .medical-kg/
 data/knowledge_base
+src/medical_kg/db/migrations/*
+!src/medical_kg/db/migrations/003_canonicalization.sql
 src/medical_kg/db/migrations
-

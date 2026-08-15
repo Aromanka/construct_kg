@@ -25,8 +25,10 @@ def test_required_sqlite_tables_are_declared() -> None:
         "entities",
         "entity_aliases",
         "entity_external_ids",
+        "entity_resolutions",
         "raw_assertions",
         "assertions",
+        "assertion_evidence",
         "relation_types",
         "invalid_records",
     }

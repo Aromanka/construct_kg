@@ -33,6 +33,17 @@ class PromptRegistry:
             ) from error
         return PromptDefinition(**definition)
 
+    def entity_canonicalization(self) -> PromptDefinition:
+        return self._single("entity_canonicalization.yaml")
+
+    def relation_canonicalization(self) -> PromptDefinition:
+        return self._single("relation_canonicalization.yaml")
+
+    def _single(self, filename: str) -> PromptDefinition:
+        path = self.directory / filename
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return PromptDefinition(**data)
+
 
 def load_relation_vocabulary(path: Path) -> list[str]:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

@@ -320,8 +320,12 @@ class Neo4jImporter:
                 "WHERE s.entity_id = a.subject_entity_id "
                 "AND o.entity_id = a.object_entity_id "
                 "AND t.relation_id = a.canonical_relation_id "
+                "OPTIONAL MATCH (e:SQL_assertion_evidence) "
+                "WHERE e.assertion_id = a.assertion_id "
+                "WITH a, s, o, t, count(e) AS support_count "
                 "MERGE (s)-[r:ASSERTION {sql_key: a.sql_key}]->(o) "
-                "SET r += properties(a), r.relation = t.canonical_name "
+                "SET r += properties(a), r.relation = t.canonical_name, "
+                "r.support_count = support_count "
                 "RETURN count(r) AS count"
             )
             counts["assertions"] = _single_count(result)
@@ -375,14 +379,17 @@ def inspect_database(path: Path) -> None:
         reader.close()
 
 
-def create_driver(uri: str, user: str, password: str) -> Any:
+def create_driver(
+    uri: str, user: str, password: str | None, *, no_auth: bool = False
+) -> Any:
     try:
         from neo4j import GraphDatabase
     except ImportError as exc:
         raise SystemExit(
             "缺少 Neo4j 驱动。请先运行：python -m pip install 'neo4j>=5,<7'"
         ) from exc
-    driver = GraphDatabase.driver(uri, auth=(user, password))
+    auth = None if no_auth else (user, password)
+    driver = GraphDatabase.driver(uri, auth=auth)
     try:
         driver.verify_connectivity()
     except Exception:
@@ -396,9 +403,14 @@ def _record_value(record: Any, key: str) -> Any:
 
 
 def query_graph(driver: Any, database: str | None, mode: str, limit: int) -> dict[str, Any]:
-    relationship_filter = (
-        "WHERE type(r) IN ['RAW_ASSERTION', 'ASSERTION'] " if mode == "knowledge" else ""
-    )
+    if mode == "knowledge":
+        mode = "canonical"
+    filters = {
+        "canonical": "WHERE type(r) = 'ASSERTION' ",
+        "raw": "WHERE type(r) = 'RAW_ASSERTION' ",
+        "all": "",
+    }
+    relationship_filter = filters.get(mode, filters["canonical"])
     query = (
         "MATCH (source:SQLRow)-[r]->(target:SQLRow) "
         f"{relationship_filter}"
@@ -407,9 +419,6 @@ def query_graph(driver: Any, database: str | None, mode: str, limit: int) -> dic
     )
     result = driver.execute_query(query, limit=limit, database_=database)
     records = result.records if hasattr(result, "records") else result[0]
-    if not records and mode == "knowledge":
-        return query_graph(driver, database, "all", limit)
-
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     for index, record in enumerate(records):
@@ -498,9 +507,9 @@ class GraphRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/graph":
             parameters = parse_qs(parsed.query)
-            mode = parameters.get("mode", ["knowledge"])[0]
-            if mode not in {"knowledge", "all"}:
-                mode = "knowledge"
+            mode = parameters.get("mode", ["canonical"])[0]
+            if mode not in {"canonical", "raw", "all"}:
+                mode = "canonical"
             try:
                 requested = int(parameters.get("limit", ["500"])[0])
                 limit = max(1, min(requested, MAX_WEB_ITEMS))
@@ -567,6 +576,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Neo4j 密码；推荐设置 NEO4J_PASSWORD 环境变量",
     )
     parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="连接已禁用身份验证的本地 Neo4j，不发送用户名和密码",
+    )
+    parser.add_argument(
         "--database", default=os.getenv("NEO4J_DATABASE"), help="Neo4j 数据库名（默认数据库可省略）"
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="批量写入行数")
@@ -585,12 +599,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.action == "inspect":
         inspect_database(args.sqlite)
         return 0
-    if not args.password:
-        parser.error("需要 --password 或 NEO4J_PASSWORD（inspect 操作除外）")
+    if args.no_auth and args.password:
+        parser.error("--no-auth 不能与 --password/NEO4J_PASSWORD 同时使用")
+    if not args.no_auth and not args.password:
+        parser.error("需要 --password/NEO4J_PASSWORD，或显式指定 --no-auth")
     if args.batch_size < 1:
         parser.error("--batch-size 必须大于 0")
 
-    driver = create_driver(args.uri, args.user, args.password)
+    driver = create_driver(args.uri, args.user, args.password, no_auth=args.no_auth)
     try:
         if args.action in {"all", "import"}:
             import_database(args, driver)
@@ -619,33 +635,34 @@ table{width:100%;border-collapse:collapse;word-break:break-word}th,td{padding:6p
 @media(max-width:760px){main{grid-template-columns:1fr}aside{position:absolute;right:0;bottom:0;width:100%;height:38%;border-top:1px solid var(--line)}header{overflow-x:auto}.status{display:none}}
 </style></head>
 <body><header><h1>Medical KG Explorer</h1>
-<select id="mode"><option value="knowledge">知识关系</option><option value="all">完整数据库</option></select>
+<select id="mode"><option value="canonical">Gold 规范化图</option><option value="raw">Bronze 原始图（诊断）</option><option value="all">完整数据库</option></select>
 <input id="limit" type="number" min="1" max="5000" value="500" title="最多关系数">
 <input id="search" type="search" placeholder="搜索名称、类型或任意属性…">
 <button id="reload">加载</button><span class="status" id="status">准备加载</span></header>
 <main><canvas id="graph"></canvas><aside id="detail"><h2>节点详情</h2><p class="hint">单击节点或关系查看 SQL 中保留的全部属性。拖拽节点，滚轮缩放，拖拽空白处平移。</p></aside></main>
 <script>
 const canvas=document.querySelector('#graph'),ctx=canvas.getContext('2d'),detail=document.querySelector('#detail'),statusEl=document.querySelector('#status');
-let nodes=[],edges=[],scale=1,pan={x:0,y:0},drag=null,hover=null,frame=0;
+let nodes=[],edges=[],scale=1,pan={x:0,y:0},drag=null,hover=null,frame=0,ticksLeft=0,animationPending=false;
 const palette=['#55d6be','#68a8ff','#ffb45b','#d486ff','#ff718d','#8bd450','#ffd166','#5ad5e8'];
 function hash(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))|0;return Math.abs(h)}
 function color(kind){return palette[hash(kind)%palette.length]}
 function resize(){const r=canvas.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);draw()}
 function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function display(item,title){const props=item.properties||{};let rows=Object.entries(props).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(typeof v==='object'?JSON.stringify(v,null,2):v)}</td></tr>`).join('');detail.innerHTML=`<h2>${escapeHtml(title)}</h2><div>${(item.labels||[item.type,item.kind]).filter(Boolean).map(x=>`<span class="tag">${escapeHtml(x)}</span>`).join('')}</div><table>${rows}</table>`}
-function resetPositions(){const w=canvas.clientWidth,h=canvas.clientHeight,n=Math.max(nodes.length,1);nodes.forEach((x,i)=>{const a=i*Math.PI*(3-Math.sqrt(5)),r=25*Math.sqrt(i);x.x=w/2+Math.cos(a)*r;x.y=h/2+Math.sin(a)*r;x.vx=x.vy=0});pan={x:0,y:0};scale=1}
-function simulate(){if(!nodes.length)return;const byId=new Map(nodes.map(n=>[n.id,n]));for(const e of edges){const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)continue;let dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)),f=(d-115)*.0009;a.vx+=dx*f;a.vy+=dy*f;b.vx-=dx*f;b.vy-=dy*f}for(let i=0;i<nodes.length;i++){for(let j=i+1;j<Math.min(nodes.length,i+90);j++){const a=nodes[i],b=nodes[j];let dx=b.x-a.x,dy=b.y-a.y,d2=dx*dx+dy*dy+1,f=Math.min(.8,900/d2);a.vx-=dx*f*.012;a.vy-=dy*f*.012;b.vx+=dx*f*.012;b.vy+=dy*f*.012}}for(const n of nodes){if(n!==drag){n.vx*=.88;n.vy*=.88;n.x+=n.vx;n.y+=n.vy}}}
-function draw(){const w=canvas.clientWidth,h=canvas.clientHeight;ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(pan.x,pan.y);ctx.scale(scale,scale);const byId=new Map(nodes.map(n=>[n.id,n]));ctx.lineWidth=1/scale;ctx.font=`${11/scale}px system-ui`;for(const e of edges){const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)continue;ctx.strokeStyle=e===hover?'#fff':'#36516c';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();if(scale>.65){const x=(a.x+b.x)/2,y=(a.y+b.y)/2;ctx.fillStyle='#91a6ba';ctx.fillText(e.label.slice(0,28),x,y)}}for(const n of nodes){ctx.beginPath();ctx.arc(n.x,n.y,n===hover?9/scale:7/scale,0,Math.PI*2);ctx.fillStyle=color(n.kind);ctx.fill();if(scale>.55){ctx.fillStyle='#e8f0fa';ctx.fillText(n.label.slice(0,34),n.x+10/scale,n.y+4/scale)}}ctx.restore()}
-function animate(){simulate();draw();frame=requestAnimationFrame(animate)}
+function resetPositions(){const w=canvas.clientWidth,h=canvas.clientHeight,n=Math.max(nodes.length,1),radius=Math.max(40,Math.min(w,h)*.42);nodes.forEach((x,i)=>{const a=i*Math.PI*(3-Math.sqrt(5)),r=radius*Math.sqrt((i+1)/n);x.x=w/2+Math.cos(a)*r;x.y=h/2+Math.sin(a)*r;x.vx=x.vy=0});pan={x:0,y:0};scale=1;restartSimulation(n>2000?80:n>1000?140:240)}
+function simulate(){if(!nodes.length)return;const w=canvas.clientWidth,h=canvas.clientHeight,cx=w/2,cy=h/2,byId=new Map(nodes.map(n=>[n.id,n]));for(const e of edges){const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)continue;const dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)),strength=Math.max(-1.5,Math.min(1.5,(d-105)*.008)),fx=dx/d*strength,fy=dy/d*strength;a.vx+=fx;a.vy+=fy;b.vx-=fx;b.vy-=fy}const neighbours=nodes.length>1000?24:60;for(let i=0;i<nodes.length;i++){for(let j=i+1;j<Math.min(nodes.length,i+neighbours);j++){const a=nodes[i],b=nodes[j],dx=b.x-a.x,dy=b.y-a.y,d2=dx*dx+dy*dy+25,f=Math.min(.035,18/d2);a.vx-=dx*f;a.vy-=dy*f;b.vx+=dx*f;b.vy+=dy*f}}for(const n of nodes){if(n===drag)continue;n.vx=(n.vx+(cx-n.x)*.0004)*.86;n.vy=(n.vy+(cy-n.y)*.0004)*.86;const speed=Math.hypot(n.vx,n.vy);if(speed>8){n.vx=n.vx/speed*8;n.vy=n.vy/speed*8}n.x=Math.max(cx-w*.7,Math.min(cx+w*.7,n.x+n.vx));n.y=Math.max(cy-h*.7,Math.min(cy+h*.7,n.y+n.vy));if(!Number.isFinite(n.x)||!Number.isFinite(n.y)){n.x=cx+(Math.random()-.5)*40;n.y=cy+(Math.random()-.5)*40;n.vx=n.vy=0}}}
+function draw(){const w=canvas.clientWidth,h=canvas.clientHeight,showLabels=nodes.length<=1500;ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(pan.x,pan.y);ctx.scale(scale,scale);const byId=new Map(nodes.map(n=>[n.id,n]));ctx.lineWidth=1/scale;ctx.font=`${11/scale}px system-ui`;for(const e of edges){const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)continue;ctx.strokeStyle=e===hover?'#fff':'#36516c';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();if(showLabels&&scale>.65){const x=(a.x+b.x)/2,y=(a.y+b.y)/2;ctx.fillStyle='#91a6ba';ctx.fillText(e.label.slice(0,28),x,y)}}for(const n of nodes){ctx.beginPath();ctx.arc(n.x,n.y,n===hover?9/scale:7/scale,0,Math.PI*2);ctx.fillStyle=color(n.kind);ctx.fill();if(showLabels&&scale>.55){ctx.fillStyle='#e8f0fa';ctx.fillText(n.label.slice(0,34),n.x+10/scale,n.y+4/scale)}}ctx.restore()}
+function animate(){if(ticksLeft<=0){animationPending=false;draw();return}simulate();ticksLeft--;draw();frame=requestAnimationFrame(animate)}
+function restartSimulation(ticks=60){ticksLeft=Math.max(ticksLeft,ticks);if(!animationPending){animationPending=true;frame=requestAnimationFrame(animate)}}
 function point(ev){const r=canvas.getBoundingClientRect();return{x:(ev.clientX-r.left-pan.x)/scale,y:(ev.clientY-r.top-pan.y)/scale}}
 function nearest(p){let best=null,dist=16/scale;for(const n of nodes){const d=Math.hypot(n.x-p.x,n.y-p.y);if(d<dist){best=n;dist=d}}return best}
 canvas.addEventListener('mousedown',e=>{const p=point(e);drag=nearest(p)||{pan:true,sx:e.clientX,sy:e.clientY,px:pan.x,py:pan.y}});
-addEventListener('mousemove',e=>{if(!drag)return;if(drag.pan){pan.x=drag.px+e.clientX-drag.sx;pan.y=drag.py+e.clientY-drag.sy}else{const p=point(e);drag.x=p.x;drag.y=p.y;drag.vx=drag.vy=0}});
-addEventListener('mouseup',()=>drag=null);canvas.addEventListener('wheel',e=>{e.preventDefault();scale=Math.max(.15,Math.min(4,scale*Math.exp(-e.deltaY*.001)));draw()},{passive:false});
+addEventListener('mousemove',e=>{if(!drag)return;if(drag.pan){pan.x=drag.px+e.clientX-drag.sx;pan.y=drag.py+e.clientY-drag.sy;draw()}else{const p=point(e);drag.x=p.x;drag.y=p.y;drag.vx=drag.vy=0;restartSimulation(30)}});
+addEventListener('mouseup',()=>{if(drag&&!drag.pan)restartSimulation(80);drag=null});canvas.addEventListener('wheel',e=>{e.preventDefault();scale=Math.max(.15,Math.min(4,scale*Math.exp(-e.deltaY*.001)));draw()},{passive:false});
 canvas.addEventListener('click',e=>{const n=nearest(point(e));if(n)display(n,n.label)});
 document.querySelector('#search').addEventListener('input',e=>{const q=e.target.value.trim().toLowerCase();hover=q?nodes.find(n=>JSON.stringify(n).toLowerCase().includes(q)):null;if(hover){display(hover,hover.label);pan.x=canvas.clientWidth/2-hover.x*scale;pan.y=canvas.clientHeight/2-hover.y*scale}draw()});
-async function load(){statusEl.textContent='加载中…';try{const mode=document.querySelector('#mode').value,limit=document.querySelector('#limit').value;const response=await fetch(`/api/graph?mode=${mode}&limit=${limit}`),data=await response.json();if(!response.ok)throw Error(data.error||response.statusText);nodes=data.nodes;edges=data.edges;resetPositions();statusEl.textContent=`${nodes.length} 节点 · ${edges.length} 关系${data.mode!==mode?'（知识关系为空，已显示完整数据库）':''}`;detail.innerHTML='<h2>图谱概览</h2><p class="hint">'+statusEl.textContent+'。单击任意节点查看全部属性。</p>'}catch(e){statusEl.textContent='加载失败';detail.innerHTML=`<h2>错误</h2><p>${escapeHtml(e.message)}</p>`}}
-document.querySelector('#reload').onclick=load;document.querySelector('#mode').onchange=load;addEventListener('resize',resize);resize();cancelAnimationFrame(frame);animate();load();
+async function load(){statusEl.textContent='加载中…';try{const mode=document.querySelector('#mode').value,limit=document.querySelector('#limit').value;const response=await fetch(`/api/graph?mode=${mode}&limit=${limit}`),data=await response.json();if(!response.ok)throw Error(data.error||response.statusText);nodes=data.nodes;edges=data.edges;resetPositions();const emptyHint=mode==='canonical'&&!edges.length?' · 尚无 Gold 关系，请先运行 canonicalize':'';statusEl.textContent=`${nodes.length} 节点 · ${edges.length} 关系${emptyHint}`;detail.innerHTML='<h2>图谱概览</h2><p class="hint">'+statusEl.textContent+'。单击任意节点查看全部属性。</p>'}catch(e){statusEl.textContent='加载失败';detail.innerHTML=`<h2>错误</h2><p>${escapeHtml(e.message)}</p>`}}
+document.querySelector('#reload').onclick=load;document.querySelector('#mode').onchange=load;addEventListener('resize',resize);resize();load();
 </script></body></html>'''
 
 

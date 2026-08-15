@@ -1,4 +1,7 @@
-from medical_kg.utils.statistics import assemble_knowledge_statistics
+from medical_kg.utils.statistics import (
+    assemble_knowledge_statistics,
+    compute_graph_quality,
+)
 
 
 def test_assemble_knowledge_statistics_summarizes_committed_work() -> None:
@@ -70,3 +73,30 @@ def test_assemble_knowledge_statistics_uses_null_rate_when_no_assertions() -> No
     )
 
     assert result["quality"]["evidence_validation_rate"] is None
+
+
+def test_compute_graph_quality_reports_connectivity_and_reuse() -> None:
+    result = compute_graph_quality(
+        edges=[
+            ("t2d", "metformin", "treats"),
+            ("t2d", "obesity", "associated_with"),
+            ("isolated-a", "isolated-b", "OTHER"),
+        ],
+        mention_count=12,
+        entity_count=5,
+        entity_documents=[
+            ("t2d", "doc-1"),
+            ("t2d", "doc-2"),
+            ("metformin", "doc-1"),
+        ],
+        evidence_count=5,
+    )
+
+    assert result == {
+        "singleton_edge_ratio": 0.3333,
+        "largest_connected_component_ratio": 0.6,
+        "canonical_compression_ratio": 2.4,
+        "cross_document_reuse_rate": 0.2,
+        "relation_other_ratio": 0.3333,
+        "duplicate_canonical_assertion_ratio": 0.4,
+    }

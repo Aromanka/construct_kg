@@ -37,6 +37,13 @@ extraction:
 relations:
   vocabulary_file: config/relations.yaml
 
+canonicalization:
+  # Deterministic exact/synonym/abbreviation resolution is always enabled.
+  # Turn this on only when LLM calls for ambiguous candidates are desired.
+  semantic: false
+  confidence_threshold: 0.85
+  candidate_top_k: 8
+
 prompts:
   directory: prompts
 
