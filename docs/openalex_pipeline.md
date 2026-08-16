@@ -67,6 +67,13 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
 
 ## 筛选规则
 
+- 默认顶层 Field 门控：从 Work 的 `topics[].field.id` 读取 OpenAlex Field，只保留
+  Medicine (27)、Health Professions (36)、Biochemistry, Genetics and Molecular Biology (13)、
+  Immunology and Microbiology (24)、Neuroscience (28)、Pharmacology, Toxicology and
+  Pharmaceutics (30)。缺少 Field 的 Work 默认丢弃。
+- `--field ID`：可重复；用指定 OpenAlex Field ID 替换上述默认集合。
+- `--no-medical-field-filter`：关闭默认 Field 门控；若没有其他筛选条件，还需显式指定
+  `--all`。
 - `--keyword`：可重复；匹配标题与恢复后的摘要，不区分大小写并做 Unicode NFKC 归一化。
 - `--keyword-mode any|all`：任一关键词命中或所有关键词同时命中。
 - `--exclude-keyword`：命中任一排除词即丢弃。
@@ -76,7 +83,8 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
 - `--include-id W...`：无视普通过滤条件，始终加入指定 Work。
 - `--max-candidates` / `--max-selected`：控制候选或选中数量。
 - `--max-works`：仅用于小规模试跑；正式全快照筛选不要设置。
-- `--all`：明确允许无过滤条件选取全部 Work；为避免误操作，缺少筛选条件时必须显式指定。
+- `--all`：选取 Field 门控放行的全部 Work；若同时使用 `--no-medical-field-filter`，则明确
+  允许无过滤条件选取全部 Work。
 
 `--require-fulltext` 只说明快照元数据提示“可能有正文”，不等于正文已经下载或解析。
 若必须拥有实际正文，使用 `--content-mode fulltext`；无法解析到正文的 Work 会记录在 catalog，

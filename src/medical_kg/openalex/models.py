@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _WORK_ID = re.compile(r"^W\d+$", re.IGNORECASE)
+_FIELD_ID = re.compile(r"(?:^|/)fields/(\d+)/?$", re.IGNORECASE)
 
 
 def normalize_work_id(value: str) -> str:
@@ -14,6 +15,44 @@ def normalize_work_id(value: str) -> str:
     if not _WORK_ID.fullmatch(candidate):
         raise ValueError(f"Invalid OpenAlex Work ID: {value!r}")
     return candidate
+
+
+def normalize_field_id(value: Any) -> int | None:
+    """Return an OpenAlex numeric Field ID from an ID object, URL, or integer."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, dict):
+        value = value.get("id")
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if candidate.isdigit():
+        field_id = int(candidate)
+        return field_id if field_id > 0 else None
+    match = _FIELD_ID.search(candidate)
+    field_id = int(match.group(1)) if match else 0
+    return field_id if field_id > 0 else None
+
+
+def collect_field_ids(raw: dict[str, Any]) -> frozenset[int]:
+    """Collect Field IDs from OpenAlex Work ``topics`` taxonomy objects."""
+
+    field_ids: set[int] = set()
+    topics = raw.get("topics")
+    topic_records = topics if isinstance(topics, list) else []
+    primary_topic = raw.get("primary_topic")
+    if isinstance(primary_topic, dict):
+        topic_records = [primary_topic, *topic_records]
+    for topic in topic_records:
+        if not isinstance(topic, dict):
+            continue
+        field_id = normalize_field_id(topic.get("field"))
+        if field_id is not None:
+            field_ids.add(field_id)
+    return frozenset(field_ids)
 
 
 def restore_abstract(inverted_index: Any) -> str | None:
@@ -103,6 +142,10 @@ class OpenAlexWork:
     @property
     def document_id(self) -> str:
         return f"openalex:{self.work_id}"
+
+    @property
+    def field_ids(self) -> frozenset[int]:
+        return collect_field_ids(self.raw)
 
     @classmethod
     def from_raw(

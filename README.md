@@ -218,7 +218,8 @@ the full canonical entity index.
 ## OpenAlex 文献筛选与知识抽取
 
 项目根目录的 `openalex_pipeline.py` 是 OpenAlex 专用核心入口。它流式读取
-`data/works/updated_date=*/part_*.gz`，支持标题/摘要关键词、source、全文可用性提示、
+`data/works/updated_date=*/part_*.gz`，默认按 OpenAlex Field 保留医学与生物医学文献，
+并支持标题/摘要关键词、source、全文可用性提示、
 分批 LLM 编号筛选、显式 Work ID 追加、正文准备，以及复用现有流水线抽取知识关系。
 
 ```powershell

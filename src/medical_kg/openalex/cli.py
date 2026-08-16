@@ -12,7 +12,7 @@ from medical_kg.cli import _repository, _runner, _settings
 from medical_kg.landing.loader import DocumentLoader
 from medical_kg.models.source import SourceType
 from medical_kg.openalex.catalog import OpenAlexCatalog
-from medical_kg.openalex.filtering import WorkFilter
+from medical_kg.openalex.filtering import MEDICAL_BROAD_FIELDS, WorkFilter
 from medical_kg.openalex.fulltext import FullTextResolver
 from medical_kg.openalex.pipeline import OpenAlexPipeline, SelectionOptions
 from medical_kg.openalex.screening import CompatibleWorkScreener
@@ -46,6 +46,20 @@ def _add_workspace(parser: argparse.ArgumentParser) -> None:
 def _add_selection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("snapshot", type=Path, help="OpenAlex snapshot root")
     _add_workspace(parser)
+    field_filter = parser.add_mutually_exclusive_group()
+    field_filter.add_argument(
+        "--field",
+        action="append",
+        type=_positive,
+        default=[],
+        metavar="ID",
+        help="Repeatable OpenAlex Field ID; replaces the default medical/biomedical set",
+    )
+    field_filter.add_argument(
+        "--no-medical-field-filter",
+        action="store_true",
+        help="Disable the default medical/biomedical OpenAlex Field gate",
+    )
     parser.add_argument(
         "--keyword", action="append", default=[], help="Repeatable title/abstract keyword"
     )
@@ -70,7 +84,7 @@ def _add_selection(parser: argparse.ArgumentParser) -> None:
         "--all",
         dest="select_all",
         action="store_true",
-        help="Explicitly allow selection without any filter",
+        help="Select all Works admitted by the active Field gate",
     )
     parser.add_argument("--max-works", type=_positive, help="Testing/debug scan cap")
     parser.add_argument("--max-candidates", type=_nonnegative)
@@ -151,8 +165,14 @@ def _catalog(workspace: Path) -> OpenAlexCatalog:
 
 def _selection_options(args: argparse.Namespace) -> SelectionOptions:
     instruction = _instruction(args.llm_prompt)
+    allowed_field_ids = (
+        None
+        if args.no_medical_field_filter
+        else tuple(sorted(set(args.field) if args.field else MEDICAL_BROAD_FIELDS))
+    )
     has_filter = any(
         (
+            allowed_field_ids is not None,
             args.keyword,
             args.source,
             args.require_fulltext,
@@ -165,10 +185,18 @@ def _selection_options(args: argparse.Namespace) -> SelectionOptions:
             "At least one filter is required; pass --all to intentionally scan/select all Works"
         )
     only_explicit = bool(args.include_id) and not any(
-        (args.keyword, args.source, args.require_fulltext, instruction, args.select_all)
+        (
+            args.field,
+            args.keyword,
+            args.source,
+            args.require_fulltext,
+            instruction,
+            args.select_all,
+        )
     )
     return SelectionOptions(
         work_filter=WorkFilter(
+            allowed_field_ids=allowed_field_ids,
             keywords=args.keyword,
             keyword_mode=args.keyword_mode,
             exclude_keywords=args.exclude_keyword,

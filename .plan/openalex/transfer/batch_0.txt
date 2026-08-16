@@ -1,0 +1,19 @@
+scp -P 22222 -r user@ip:远程路径 /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/batch_000
+
+远程路径包含以下文件，将文件拷贝到batch_000文件夹内：
+'/volume1/X-Diabetes/openalex/openalex-snapshot/data/works/'下的这些文件
+'updated_date=2016-06-24'
+'updated_date=2016-07-22'
+'updated_date=2016-08-23'
+'updated_date=2016-09-16'
+'updated_date=2016-09-23'
+'updated_date=2016-09-30'
+'updated_date=2016-10-07'
+'updated_date=2016-10-14'
+'updated_date=2016-10-21'
+'updated_date=2016-10-28'
+'updated_date=2016-11-04'
+'updated_date=2016-11-11'
+'updated_date=2016-11-30'
+'updated_date=2016-12-08'
+'updated_date=2016-12-16'
