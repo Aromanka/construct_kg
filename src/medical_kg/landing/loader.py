@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +32,11 @@ class DocumentLoader:
         self.repository = repository
 
     async def ingest(
-        self, source: Path, *, source_type: SourceType = SourceType.RESEARCH
+        self,
+        source: Path,
+        *,
+        source_type: SourceType = SourceType.RESEARCH,
+        progress: Callable[[IngestResult], None] | None = None,
     ) -> IngestResult:
         result = IngestResult()
         for path in self._discover(source):
@@ -56,7 +60,14 @@ class DocumentLoader:
                     "document ingestion failed",
                     extra={"document_id": str(path), "stage": "landing"},
                 )
+            if progress is not None:
+                progress(result)
         return result
+
+    def count(self, source: Path) -> int:
+        """Count documents that would be discovered by ``ingest``."""
+
+        return sum(1 for _ in self._discover(source))
 
     def _discover(self, source: Path) -> Iterable[Path]:
         if source.is_file():

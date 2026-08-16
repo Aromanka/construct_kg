@@ -110,6 +110,7 @@ python -m medical_kg extract
 python -m medical_kg run ./papers
 python -m medical_kg run ./textbooks --source-type textbook --chunk-size 12000 --chunk-overlap 500
 python -m medical_kg run --limit 100
+python -m medical_kg run ./papers --progress-style log  # use the legacy log stream
 python -m medical_kg extract --document-id PMID:123456
 python -m medical_kg retry-failed
 python -m medical_kg status
@@ -117,6 +118,9 @@ python -m medical_kg stats
 python -m medical_kg canonicalize
 python -m medical_kg canonicalize --semantic
 ```
+
+`medical_kg run` displays tqdm progress bars with ETA by default. Pass
+`--progress-style log` to use the previous configured log output instead.
 
 Commands are executed through the Python module entry point; no generated `.exe` launcher is
 required. Run them from the project root after activating the virtual environment.

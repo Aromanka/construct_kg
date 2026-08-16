@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
+from tqdm.auto import tqdm
 
 from medical_kg.bronze.extraction import BronzeExtractor
 from medical_kg.config import AppSettings, load_settings
@@ -21,6 +23,11 @@ from medical_kg.pipeline.runner import PipelineRunner
 from medical_kg.prompts import PromptRegistry, load_relation_vocabulary
 from medical_kg.silver.canonicalization import CanonicalizationPipeline
 from medical_kg.utils.statistics import collect_knowledge_statistics
+
+_PROGRESS_FORMAT = (
+    "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+    "[elapsed {elapsed}, ETA {remaining}, {rate_fmt}]"
+)
 
 
 def _positive_int(value: str) -> int:
@@ -41,9 +48,15 @@ def _execute(coroutine: Coroutine[Any, Any, Any]) -> Any:
     return asyncio.run(coroutine)
 
 
-def _settings(config: Path) -> AppSettings:
+def _settings(config: Path, *, verbose_logs: bool = True) -> AppSettings:
     settings = load_settings(config)
-    configure_logging(settings.logging.level, settings.logging.json_output)
+    configured_level = settings.logging.level
+    if (
+        not verbose_logs
+        and getattr(logging, configured_level.upper(), logging.INFO) < logging.WARNING
+    ):
+        configured_level = "WARNING"
+    configure_logging(configured_level, settings.logging.json_output)
     return settings
 
 
@@ -89,7 +102,8 @@ def _print(value: Any) -> None:
 
 
 async def _run_command(args: argparse.Namespace) -> Any:
-    settings = _settings(args.config)
+    progress_style = getattr(args, "progress_style", "log")
+    settings = _settings(args.config, verbose_logs=progress_style == "log")
     repository = _repository(settings)
     runner: PipelineRunner | None = None
     canonicalization_llm = None
@@ -117,14 +131,81 @@ async def _run_command(args: argparse.Namespace) -> Any:
 
         if args.command == "run":
             runner = _runner(settings, repository)
-            ingested, extracted = await runner.run(
-                args.source.resolve() if args.source else None,
-                limit=args.limit,
-                document_id=args.document_id,
-                source_type=SourceType(args.source_type),
-                chunk_size=args.chunk_size,
-                chunk_overlap=args.chunk_overlap,
-            )
+            source = args.source.resolve() if args.source else None
+            ingest_bar = None
+            extraction_bar = None
+            extraction_successful = 0
+            extraction_failed = 0
+            if progress_style == "bar":
+                if source is not None:
+                    ingest_bar = tqdm(
+                        total=runner.loader.count(source),
+                        desc="Ingesting documents",
+                        unit="document",
+                        dynamic_ncols=True,
+                        bar_format=_PROGRESS_FORMAT,
+                    )
+
+            def update_ingest(result: Any) -> None:
+                if ingest_bar is not None:
+                    ingest_bar.update(1)
+                    ingest_bar.set_postfix(
+                        created=result.created,
+                        changed=result.changed,
+                        failed=result.failed,
+                        refresh=False,
+                    )
+
+            def set_extraction_total(total: int) -> None:
+                if extraction_bar is not None:
+                    extraction_bar.reset(total=total)
+
+            def update_extraction(result: Any) -> None:
+                nonlocal extraction_successful, extraction_failed
+                if extraction_bar is not None:
+                    extraction_successful += result.documents_successful
+                    extraction_failed += result.documents_failed
+                    extraction_bar.update(1)
+                    extraction_bar.set_postfix(
+                        successful=extraction_successful,
+                        failed=extraction_failed,
+                        refresh=False,
+                    )
+
+            ingested = None
+            if source is not None:
+                try:
+                    ingested = await runner.loader.ingest(
+                        source,
+                        source_type=SourceType(args.source_type),
+                        progress=update_ingest if ingest_bar is not None else None,
+                    )
+                finally:
+                    if ingest_bar is not None:
+                        ingest_bar.close()
+
+            if progress_style == "bar":
+                extraction_bar = tqdm(
+                    total=0,
+                    desc="Extracting documents",
+                    unit="job",
+                    dynamic_ncols=True,
+                    bar_format=_PROGRESS_FORMAT,
+                )
+            try:
+                extracted = await runner.extract(
+                    limit=args.limit,
+                    document_id=args.document_id,
+                    chunk_size=args.chunk_size,
+                    chunk_overlap=args.chunk_overlap,
+                    progress=update_extraction if extraction_bar is not None else None,
+                    progress_total=(
+                        set_extraction_total if extraction_bar is not None else None
+                    ),
+                )
+            finally:
+                if extraction_bar is not None:
+                    extraction_bar.close()
             return {
                 "ingest": ingested.__dict__ if ingested else None,
                 "extraction": extracted.__dict__,
@@ -209,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="Optionally ingest, then extract")
     run.add_argument("source", nargs="?", type=Path)
+    run.add_argument(
+        "--progress-style",
+        choices=("bar", "log"),
+        default="bar",
+        help="Progress output style: tqdm bars (default) or the existing logs",
+    )
     _add_source_type(run)
     _add_extraction_options(run)
 

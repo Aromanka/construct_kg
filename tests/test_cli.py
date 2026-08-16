@@ -22,6 +22,10 @@ def test_run_parser_accepts_lightweight_module_command_options() -> None:
     assert args.source_type == "guidelines"
     assert args.chunk_size == 12000
     assert args.chunk_overlap == 500
+    assert args.progress_style == "bar"
+
+    log_args = build_parser().parse_args(["run", "--progress-style", "log"])
+    assert log_args.progress_style == "log"
 
 
 def test_canonicalize_parser_accepts_silver_options() -> None:

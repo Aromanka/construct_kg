@@ -196,6 +196,7 @@ class BronzeExtractor:
         document_id: str | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int = 0,
+        progress: Callable[[RunStatistics], None] | None = None,
     ) -> RunStatistics:
         stage_version = self.stage_version(chunk_size, chunk_overlap)
         job_concurrency = getattr(self.settings.processing, "job_concurrency", 100)
@@ -212,6 +213,7 @@ class BronzeExtractor:
                     available_job_slots,
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
+                    progress=progress,
                 )
             )
             for _ in range(job_concurrency)
@@ -276,6 +278,7 @@ class BronzeExtractor:
         *,
         chunk_size: int | None,
         chunk_overlap: int,
+        progress: Callable[[RunStatistics], None] | None,
     ) -> RunStatistics:
         statistics = RunStatistics()
         while True:
@@ -293,6 +296,8 @@ class BronzeExtractor:
                     available_job_slots.release()
                 queue.task_done()
             statistics.add(outcome)
+            if progress is not None:
+                progress(outcome)
 
     async def _process_with_heartbeat(
         self,

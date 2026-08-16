@@ -178,6 +178,27 @@ class KnowledgeRepository:
             result = await session.execute(statement)
             return result.rowcount or 0
 
+    async def count_pending_jobs(
+        self,
+        *,
+        stages: Sequence[str],
+        stage_version: str,
+        document_id: str | None = None,
+    ) -> int:
+        statement = (
+            select(func.count())
+            .select_from(ProcessingJob)
+            .where(
+                ProcessingJob.status == JobStatus.PENDING.value,
+                ProcessingJob.stage.in_(stages),
+                ProcessingJob.stage_version == stage_version,
+            )
+        )
+        if document_id:
+            statement = statement.where(ProcessingJob.document_id == document_id)
+        async with self.sessions() as session:
+            return int((await session.scalar(statement)) or 0)
+
     async def claim_job(
         self,
         *,

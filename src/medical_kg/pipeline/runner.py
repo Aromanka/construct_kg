@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from medical_kg.bronze.extraction import BronzeExtractor, RunStatistics
@@ -36,6 +36,8 @@ class PipelineRunner:
         worker_id: str | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int = 0,
+        progress: Callable[[RunStatistics], None] | None = None,
+        progress_total: Callable[[int], None] | None = None,
     ) -> RunStatistics:
         # Fail invalid chunk settings before touching job state in SQLite.
         self.extractor.stage_version(chunk_size, chunk_overlap)
@@ -57,11 +59,21 @@ class PipelineRunner:
         await self.extractor.enqueue(
             selected_document_ids, chunk_size=chunk_size, chunk_overlap=chunk_overlap
         )
+        stage_version = self.extractor.stage_version(chunk_size, chunk_overlap)
+        if progress_total is not None:
+            progress_total(
+                await self.repository.count_pending_jobs(
+                    stages=self.extractor.job_stages,
+                    stage_version=stage_version,
+                    document_id=document_id,
+                )
+            )
         return await self.extractor.run(
             worker_id=worker_id or default_worker_id(),
             document_id=document_id,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            progress=progress,
         )
 
     async def run(
@@ -74,13 +86,26 @@ class PipelineRunner:
         source_type: SourceType = SourceType.RESEARCH,
         chunk_size: int | None = None,
         chunk_overlap: int = 0,
+        ingest_progress: Callable[[IngestResult], None] | None = None,
+        extraction_progress: Callable[[RunStatistics], None] | None = None,
+        extraction_total: Callable[[int], None] | None = None,
     ) -> tuple[IngestResult | None, RunStatistics]:
-        ingest_result = await self.ingest(source, source_type=source_type) if source else None
+        ingest_result = (
+            await self.loader.ingest(
+                source,
+                source_type=source_type,
+                progress=ingest_progress,
+            )
+            if source
+            else None
+        )
         extract_result = await self.extract(
             limit=limit,
             document_id=document_id,
             worker_id=worker_id,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            progress=extraction_progress,
+            progress_total=extraction_total,
         )
         return ingest_result, extract_result

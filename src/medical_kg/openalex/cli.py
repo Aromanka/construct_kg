@@ -357,7 +357,7 @@ async def _run(args: argparse.Namespace) -> Any:
             snapshot=snapshot,
             catalog=catalog,
             workspace=args.workspace,
-            show_progress=args.command in {"select", "run"},
+            show_progress=args.command in {"select", "run", "materialize"},
         )
         if args.command == "add":
             result = await pipeline.add(set(args.work_ids), max_works=args.max_works)
