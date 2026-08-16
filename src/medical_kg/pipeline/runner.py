@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from medical_kg.bronze.extraction import BronzeExtractor, RunStatistics
@@ -31,6 +32,7 @@ class PipelineRunner:
         *,
         limit: int | None = None,
         document_id: str | None = None,
+        document_ids: Sequence[str] | None = None,
         worker_id: str | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int = 0,
@@ -45,11 +47,15 @@ class PipelineRunner:
             + 60 * self.extractor.settings.processing.max_retries
         )
         await self.repository.recover_stale_jobs(older_than_seconds=stale_after)
-        document_ids = (
-            [document_id] if document_id else await self.repository.list_document_ids(limit)
+        if document_id and document_ids is not None:
+            raise ValueError("document_id and document_ids cannot be used together")
+        selected_document_ids = (
+            list(document_ids)
+            if document_ids is not None
+            else ([document_id] if document_id else await self.repository.list_document_ids(limit))
         )
         await self.extractor.enqueue(
-            document_ids, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+            selected_document_ids, chunk_size=chunk_size, chunk_overlap=chunk_overlap
         )
         return await self.extractor.run(
             worker_id=worker_id or default_worker_id(),

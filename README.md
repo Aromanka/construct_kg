@@ -215,6 +215,28 @@ meet `canonicalization.confidence_threshold`; otherwise a new entity is retained
 command is idempotent. `--document-id` can limit new work while still retrieving candidates from
 the full canonical entity index.
 
+## OpenAlex 文献筛选与知识抽取
+
+项目根目录的 `openalex_pipeline.py` 是 OpenAlex 专用核心入口。它流式读取
+`data/works/updated_date=*/part_*.gz`，支持标题/摘要关键词、source、全文可用性提示、
+分批 LLM 编号筛选、显式 Work ID 追加、正文准备，以及复用现有流水线抽取知识关系。
+
+```powershell
+python openalex_pipeline.py run D:\openalex-snapshot `
+  --keyword diabetes --keyword voice --keyword-mode all `
+  --source "Journal of Voice" --require-fulltext `
+  --llm-prompt "筛选研究糖尿病与声音或声学特征关系的原创研究，排除综述。" `
+  --llm-batch-size 20 `
+  --fulltext-dir D:\openalex-fulltext `
+  --content-mode fulltext `
+  --workspace data/openalex
+```
+
+确认候选文档后，增加 `--extract --config config.yaml` 即可将已准备文档注册到现有
+SQLite 知识库并抽取关系。筛选记录保存在 `data/openalex/catalog.sqlite3`，稳定编号采用
+`W...` / `openalex:W...`，并保留原始 Work JSON、gzip 分片路径和行号。完整命令、正文
+来源约定、增量追加与结果结构见 [OpenAlex 使用说明](docs/openalex_pipeline.md)。
+
 ## Architecture
 
 ```text

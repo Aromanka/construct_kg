@@ -146,6 +146,7 @@ outputs
 config.yaml
 .medical-kg/
 data/knowledge_base
+data/openalex/
 src/medical_kg/db/migrations/*
 !src/medical_kg/db/migrations/003_canonicalization.sql
 src/medical_kg/db/migrations
