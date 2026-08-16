@@ -16,9 +16,9 @@ API 下载正文；同时不会自动访问 publisher 的第三方 PDF URL。
 以下示例以 `batch_000` 为当前元数据批次，所有批次共用同一个 workspace：
 
 ```bash
-BATCH=/home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/batch_000
-WORKSPACE=data/openalex
-REMOTE=user@ip:/volume1/X-Diabetes/openalex/openalex-snapshot/data/works
+BATCH=/home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex
+# WORKSPACE=data/openalex
+REMOTE=PatrickGuan@47.116.73.1:/volume1/X-Diabetes/openalex/openalex-snapshot/data/works
 ```
 
 将 `user@ip` 改为实际值。
@@ -33,7 +33,10 @@ mkdir -p "$BATCH/data/works"
 scp -P 22222 -r \
   "${REMOTE}/updated_date=2016-*" \
   "$BATCH/data/works/"
+scp -P 22222 -r   "${REMOTE}/updated_date=2025-10*"   "$BATCH/data/works/"
 ```
+
+current progress to 2025-10
 
 该命令只复制 Works 元数据，不复制全文。不要复制 `legacy-data` 或异常后缀文件。
 

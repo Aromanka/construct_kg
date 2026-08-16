@@ -1,4 +1,16 @@
-scp -P 22222 -r user@ip:远程路径 /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/batch_000
+scp -P 22222 -r user@ip:/volume1/X-Diabetes/openalex/openalex-snapshot/data/works/ /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/data/works/
+
+rsync -az --info=progress2 -e "ssh -p 22222" --ignore-existing PatrickGuan@47.116.73.1:/volume1/X-Diabetes/openalex/openalex-snapshot/data/works/ /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/data/works/
+
+rsync -az \
+  --info=progress2 \
+  -e "ssh -p 22222" \
+  --rsync-path=/usr/bin/rsync \
+  --ignore-existing \
+  PatrickGuan@47.116.73.1:/volume1/X-Diabetes/openalex/openalex-snapshot/data/works/ \
+  /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/data/works/
+
+scp -P 22222 -r PatrickGuan@47.116.73.1:/volume1/X-Diabetes/openalex/openalex-snapshot/data/sources /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/data/sources/
 
 远程路径包含以下文件，将文件拷贝到batch_000文件夹内：
 '/volume1/X-Diabetes/openalex/openalex-snapshot/data/works/'下的这些文件

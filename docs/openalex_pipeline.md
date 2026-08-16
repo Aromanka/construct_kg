@@ -26,8 +26,20 @@ openalex-snapshot/
 
 仅使用确定性过滤并准备文档：
 
-```powershell
-E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/batch_000 \
+```bash
+python openalex_pipeline.py run /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex \
+  --keyword diabetes \
+  --keyword "voice" \
+  --keyword-mode any \
+  --exclude-keyword review \
+  --require-abstract \
+  --enrich-sources \
+  --workspace data/openalex
+```
+
+对于增量：
+```bash
+python openalex_pipeline.py select /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex \
   --keyword diabetes \
   --keyword "voice" \
   --keyword-mode any \
@@ -40,16 +52,41 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run /home/bml/storage/mn
 `run` 和 `materialize` 默认采用 `fulltext` 模式，并默认从 OpenAlex 内容服务下载正文；
 仅使用本地正文时增加 `--no-download-fulltext`。
 
+### 已完成筛选后，仅从摘要抽取知识
+
+如果已经执行完上面的 `run`，筛选结果已保存在 `data/openalex/catalog.sqlite3`，无需再次扫描
+OpenAlex 快照。先把 catalog 中已选文章的摘要准备成抽取文档：
+
+```bash
+python openalex_pipeline.py materialize /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex \
+  --workspace data/openalex \
+  --content-mode abstract \
+  --abstract-chunk-size 12000 \
+  --no-download-fulltext
+```
+
+然后只对摘要批次目录执行知识抽取：
+
+```bash
+python -m medical_kg run data/openalex/documents/abstract_batches \
+  --source-type research \
+  --config config.yaml
+```
+
+第二条命令的输入目录仅包含由 OpenAlex 摘要生成的文档，因此不会读取此前准备的全文文档。
+关系抽取结果写入 `config.yaml` 配置的主 SQLite 数据库。上述命令可断点续跑；已经成功入库
+和抽取且内容未变化的文档会被跳过。
+
 加入 LLM 筛选：
 
-```powershell
-E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot `
-  --keyword diabetes `
-  --llm-prompt "@prompts/my_openalex_screening.txt" `
-  --llm-batch-size 20 `
-  --content-mode abstract `
-  --abstract-chunk-size 12000 `
-  --workspace data/openalex `
+```bash
+python openalex_pipeline.py run /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex \
+  --keyword diabetes \
+  --llm-prompt "@prompts/my_openalex_screening.txt" \
+  --llm-batch-size 20 \
+  --content-mode abstract \
+  --abstract-chunk-size 12000 \
+  --workspace data/openalex \
   --config config.yaml
 ```
 
@@ -62,14 +99,17 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
 筛选提示可直接写在 `--llm-prompt` 后，也可用 `@文件路径` 读取。LLM 配置沿用项目
 `config.yaml` 中的 OpenAI-compatible/DeepSeek 配置。
 
-若要在文档准备完成后立即抽取知识关系，增加：
+如果尚未执行筛选，并希望在同一次 `run` 中仅准备摘要且立即抽取知识关系，在筛选参数后增加：
 
-```powershell
---extract --config config.yaml
+```bash
+  --content-mode abstract \
+  --no-download-fulltext \
+  --extract \
+  --config config.yaml
 ```
 
-这会复用项目现有的分块、并发 LLM 抽取、断点续跑、Bronze/Silver/Gold 数据结构，
-不会另建一套关系格式。
+这会复用项目现有的分块、并发 LLM 抽取、断点续跑、Bronze/Silver/Gold 数据结构，不会另建
+一套关系格式。若筛选已经完成，优先使用上面的“两步命令”，避免重新扫描快照。
 
 ## 筛选规则
 
@@ -158,24 +198,24 @@ document ID 是 `openalex:W...`。每条记录还保留：
 
 显式增加文档：
 
-```powershell
-E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py add D:\openalex-snapshot `
+```bash
+python openalex_pipeline.py add /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex \
   W2741809807 W1234567890 --workspace data/openalex
 ```
 
 `add` 加入的 Work 标记为 `manual`，之后重新执行普通筛选不会取消它。读取某一条完整记录：
 
-```powershell
-E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py show W2741809807 `
+```bash
+python openalex_pipeline.py show W2741809807 \
   --workspace data/openalex
 ```
 
 只重新准备 catalog 中已经选中的文档，无需再次筛选：
 
-```powershell
-E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py materialize D:\openalex-snapshot `
-  --workspace data/openalex `
-  --fulltext-dir D:\openalex-fulltext `
+```bash
+python openalex_pipeline.py materialize /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex \
+  --workspace data/openalex \
+  --fulltext-dir /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex-fulltext \
   --content-mode fulltext
 ```
 
