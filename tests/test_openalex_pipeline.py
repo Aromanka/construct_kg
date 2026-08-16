@@ -253,6 +253,27 @@ async def test_select_applies_default_medical_field_gate(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_select_progress_reports_status_and_eta(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot(tmp_path))
+    workspace = tmp_path / "progress"
+    with OpenAlexCatalog(workspace / "catalog.sqlite3") as catalog:
+        pipeline = OpenAlexPipeline(
+            snapshot=snapshot,
+            catalog=catalog,
+            workspace=workspace,
+            show_progress=True,
+        )
+        await pipeline.select(SelectionOptions())
+
+    progress_output = capsys.readouterr().err
+    assert "Selecting works" in progress_output
+    assert "ETA" in progress_output
+    assert "100%" in progress_output
+
+
+@pytest.mark.asyncio
 async def test_selection_reports_abstract_and_fulltext_availability(
     tmp_path: Path,
 ) -> None:

@@ -4,7 +4,7 @@ import gzip
 import json
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -98,13 +98,38 @@ class OpenAlexSnapshot:
         visit(payload)
         return references
 
-    def iter_raw(self, entity: str) -> Iterator[tuple[dict[str, Any], str, int]]:
+    def compressed_size(self, entity: str) -> int:
+        """Return the on-disk bytes that will be read for an entity."""
+
+        return sum(path.stat().st_size for path in self.entity_files(entity))
+
+    def iter_raw(
+        self,
+        entity: str,
+        *,
+        progress: Callable[[int], None] | None = None,
+    ) -> Iterator[tuple[dict[str, Any], str, int]]:
         # A snapshot instance can be reused. Replace stale failures for this entity
         # while preserving failures from other entities (for example, sources).
         self.read_failures = [failure for failure in self.read_failures if failure.entity != entity]
         for path in self.entity_files(entity):
             relative = path.relative_to(self.root).as_posix()
             records_read = 0
+            compressed_position = 0
+
+            def report_position(stream: Any) -> None:
+                nonlocal compressed_position
+                if progress is None:
+                    return
+                gzip_stream = getattr(stream, "buffer", None)
+                file_object = getattr(gzip_stream, "fileobj", None)
+                if file_object is None:
+                    return
+                current = int(file_object.tell())
+                if current > compressed_position:
+                    progress(current - compressed_position)
+                    compressed_position = current
+
             try:
                 with gzip.open(path, "rt", encoding="utf-8") as stream:
                     for line_number, line in enumerate(stream, start=1):
@@ -114,7 +139,9 @@ class OpenAlexSnapshot:
                         if not isinstance(payload, dict):
                             raise ValueError("JSONL record is not an object")
                         records_read += 1
+                        report_position(stream)
                         yield payload, relative, line_number
+                    report_position(stream)
             except (
                 EOFError,
                 gzip.BadGzipFile,
@@ -139,13 +166,20 @@ class OpenAlexSnapshot:
                 )
                 if self.strict:
                     raise
+            if progress is not None and compressed_position < path.stat().st_size:
+                progress(path.stat().st_size - compressed_position)
 
     def failures_for(self, entity: str) -> list[SnapshotReadFailure]:
         return [failure for failure in self.read_failures if failure.entity == entity]
 
-    def iter_works(self, *, max_works: int | None = None) -> Iterator[OpenAlexWork]:
+    def iter_works(
+        self,
+        *,
+        max_works: int | None = None,
+        progress: Callable[[int], None] | None = None,
+    ) -> Iterator[OpenAlexWork]:
         count = 0
-        for raw, relative, line_number in self.iter_raw("works"):
+        for raw, relative, line_number in self.iter_raw("works", progress=progress):
             try:
                 work = OpenAlexWork.from_raw(raw, snapshot_file=relative, snapshot_line=line_number)
             except ValueError:

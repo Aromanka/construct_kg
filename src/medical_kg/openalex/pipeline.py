@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tqdm.auto import tqdm
+
 from medical_kg.openalex.catalog import OpenAlexCatalog
 from medical_kg.openalex.filtering import WorkFilter
 from medical_kg.openalex.fulltext import FullTextResolver
@@ -15,6 +17,11 @@ from medical_kg.openalex.screening import WorkScreener
 from medical_kg.openalex.snapshot import OpenAlexSnapshot
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_FORMAT = (
+    "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+    "[elapsed {elapsed}, ETA {remaining}, {rate_fmt}]"
+)
 
 
 @dataclass(frozen=True)
@@ -67,10 +74,12 @@ class OpenAlexPipeline:
         snapshot: OpenAlexSnapshot,
         catalog: OpenAlexCatalog,
         workspace: Path,
+        show_progress: bool = False,
     ) -> None:
         self.snapshot = snapshot
         self.catalog = catalog
         self.workspace = workspace.resolve()
+        self.show_progress = show_progress
         self.workspace.mkdir(parents=True, exist_ok=True)
 
     async def select(
@@ -111,11 +120,14 @@ class OpenAlexPipeline:
         async def flush() -> None:
             if not batch:
                 return
-            selected_indexes = (
-                await screener.screen([work for work, _ in batch], options.llm_instruction or "")
-                if options.llm_instruction and screener
-                else set(range(len(batch)))
-            )
+            if options.llm_instruction and screener:
+                progress.set_description_str("Screening batch")
+                selected_indexes = await screener.screen(
+                    [work for work, _ in batch], options.llm_instruction
+                )
+                progress.set_description_str("Selecting works")
+            else:
+                selected_indexes = set(range(len(batch)))
             for index, (work, keywords) in enumerate(batch):
                 selected = index in selected_indexes
                 if (
@@ -137,9 +149,27 @@ class OpenAlexPipeline:
             self.catalog.connection.commit()
             batch.clear()
 
+        progress = tqdm(
+            total=self.snapshot.compressed_size("works"),
+            desc="Selecting works",
+            unit="B",
+            unit_scale=True,
+            dynamic_ncols=True,
+            bar_format=_PROGRESS_FORMAT,
+            disable=not self.show_progress,
+        )
         try:
-            for work in self.snapshot.iter_works(max_works=options.max_works):
+            for work in self.snapshot.iter_works(
+                max_works=options.max_works,
+                progress=progress.update,
+            ):
                 statistics.scanned += 1
+                progress.set_postfix(
+                    scanned=statistics.scanned,
+                    candidates=statistics.candidates,
+                    selected=statistics.selected,
+                    refresh=False,
+                )
                 if work.work_id in pending_ids:
                     self.catalog.upsert_work(
                         work,
@@ -184,6 +214,7 @@ class OpenAlexPipeline:
                         break
             await flush()
         finally:
+            progress.close()
             failures = self.snapshot.failures_for("works")
             statistics.snapshot_parts_failed = len(failures)
             statistics.snapshot_failures = [asdict(failure) for failure in failures]
@@ -239,14 +270,27 @@ class OpenAlexPipeline:
         found = 0
         if not wanted:
             return found
-        for source, _, _ in self.snapshot.iter_raw("sources"):
-            source_id = source.get("id")
-            if source_id and str(source_id) in wanted:
-                self.catalog.upsert_sources([source], full=True)
-                wanted.remove(str(source_id))
-                found += 1
-                if not wanted:
-                    break
+        progress = tqdm(
+            total=self.snapshot.compressed_size("sources"),
+            desc="Enriching sources",
+            unit="B",
+            unit_scale=True,
+            dynamic_ncols=True,
+            bar_format=_PROGRESS_FORMAT,
+            disable=not self.show_progress,
+        )
+        try:
+            for source, _, _ in self.snapshot.iter_raw("sources", progress=progress.update):
+                source_id = source.get("id")
+                if source_id and str(source_id) in wanted:
+                    self.catalog.upsert_sources([source], full=True)
+                    wanted.remove(str(source_id))
+                    found += 1
+                    progress.set_postfix(found=found, remaining=len(wanted), refresh=False)
+                    if not wanted:
+                        break
+        finally:
+            progress.close()
         self.catalog.connection.commit()
         return found
 
@@ -266,8 +310,23 @@ class OpenAlexPipeline:
         output_dir.mkdir(parents=True, exist_ok=True)
         statistics = MaterializeStatistics()
         abstract_works: list[OpenAlexWork] = []
-        for row in self.catalog.selected_rows(limit=limit):
+        selected_rows = self.catalog.selected_rows(limit=limit)
+        rows = tqdm(
+            selected_rows,
+            total=len(selected_rows),
+            desc="Materializing works",
+            unit="work",
+            dynamic_ncols=True,
+            bar_format=_PROGRESS_FORMAT,
+            disable=not self.show_progress,
+        )
+        for row in rows:
             statistics.selected += 1
+            rows.set_postfix(
+                written=statistics.written,
+                skipped=statistics.skipped_processed + statistics.skipped_no_content,
+                refresh=False,
+            )
             work = OpenAlexWork.from_raw(
                 json.loads(row["raw_json"]),
                 snapshot_file=row["snapshot_file"],

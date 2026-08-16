@@ -5,6 +5,7 @@ neo4j>=5,<7
 pydantic>=2.7,<3
 PyYAML>=6.0,<7
 SQLAlchemy>=2.0.31,<3
+tqdm>=4.66,<5
 
 # Optional PDF and development dependencies are intentionally excluded.
 # In the active Conda environment, install them only when needed with:

@@ -8,6 +8,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from tqdm.auto import tqdm
+
 from medical_kg.cli import _repository, _runner, _settings
 from medical_kg.landing.loader import DocumentLoader
 from medical_kg.models.source import SourceType
@@ -18,6 +20,11 @@ from medical_kg.openalex.pipeline import OpenAlexPipeline, SelectionOptions
 from medical_kg.openalex.screening import CompatibleWorkScreener
 from medical_kg.openalex.snapshot import OpenAlexSnapshot
 from medical_kg.prompts import load_relation_vocabulary
+
+_PROGRESS_FORMAT = (
+    "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+    "[elapsed {elapsed}, ETA {remaining}, {rate_fmt}]"
+)
 
 
 def _positive(value: str) -> int:
@@ -274,13 +281,21 @@ async def _extract(args: argparse.Namespace, documents: list[Path]) -> dict[str,
             "failed": 0,
         }
         document_ids = []
-        for path in documents:
+        paths = tqdm(
+            documents,
+            desc="Ingesting documents",
+            unit="document",
+            dynamic_ncols=True,
+            bar_format=_PROGRESS_FORMAT,
+        )
+        for path in paths:
             ingest = await loader.ingest(path, source_type=SourceType.RESEARCH)
             for key in ingest_totals:
                 ingest_totals[key] += getattr(ingest, key)
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("document_id"):
                 document_ids.append(str(payload["document_id"]))
+            paths.set_postfix(created=ingest_totals["created"], failed=ingest_totals["failed"])
         extraction = None
         if document_ids:
             extraction = await runner.extract(
@@ -338,7 +353,12 @@ async def _run(args: argparse.Namespace) -> Any:
         strict=bool(getattr(args, "strict_snapshot", False)),
     )
     with _catalog(args.workspace) as catalog:
-        pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=args.workspace)
+        pipeline = OpenAlexPipeline(
+            snapshot=snapshot,
+            catalog=catalog,
+            workspace=args.workspace,
+            show_progress=args.command in {"select", "run"},
+        )
         if args.command == "add":
             result = await pipeline.add(set(args.work_ids), max_works=args.max_works)
             return asdict(result)
