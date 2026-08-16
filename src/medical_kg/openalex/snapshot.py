@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -15,21 +16,30 @@ logger = logging.getLogger(__name__)
 _PART_FILE = re.compile(r"^part_\d+\.gz$")
 
 
+@dataclass(frozen=True)
+class SnapshotReadFailure:
+    entity: str
+    path: str
+    error: str
+    message: str
+    records_read: int
+
+
 class OpenAlexSnapshot:
     """Stream OpenAlex snapshot entities without materializing gzip files."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, strict: bool = False) -> None:
         self.root = Path(root).resolve()
         self.data_dir = self._find_data_dir()
+        self.strict = strict
+        self.read_failures: list[SnapshotReadFailure] = []
 
     def _find_data_dir(self) -> Path:
         candidates = (self.root / "data", self.root, self.root / "data" / "jsonl")
         for candidate in candidates:
             if (candidate / "works").is_dir():
                 return candidate
-        raise FileNotFoundError(
-            f"Cannot find data/works below OpenAlex snapshot root {self.root}"
-        )
+        raise FileNotFoundError(f"Cannot find data/works below OpenAlex snapshot root {self.root}")
 
     def entity_files(self, entity: str) -> list[Path]:
         entity_dir = self.data_dir / entity
@@ -82,17 +92,19 @@ class OpenAlexSnapshot:
             elif isinstance(value, list):
                 for nested in value:
                     visit(nested)
-            elif isinstance(value, str) and _PART_FILE.fullmatch(
-                Path(urlparse(value).path).name
-            ):
+            elif isinstance(value, str) and _PART_FILE.fullmatch(Path(urlparse(value).path).name):
                 references.append(value)
 
         visit(payload)
         return references
 
     def iter_raw(self, entity: str) -> Iterator[tuple[dict[str, Any], str, int]]:
+        # A snapshot instance can be reused. Replace stale failures for this entity
+        # while preserving failures from other entities (for example, sources).
+        self.read_failures = [failure for failure in self.read_failures if failure.entity != entity]
         for path in self.entity_files(entity):
             relative = path.relative_to(self.root).as_posix()
+            records_read = 0
             try:
                 with gzip.open(path, "rt", encoding="utf-8") as stream:
                     for line_number, line in enumerate(stream, start=1):
@@ -101,18 +113,41 @@ class OpenAlexSnapshot:
                         payload = json.loads(line)
                         if not isinstance(payload, dict):
                             raise ValueError("JSONL record is not an object")
+                        records_read += 1
                         yield payload, relative, line_number
-            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-                logger.exception("failed to read OpenAlex part", extra={"path": str(path)})
-                raise
+            except (
+                EOFError,
+                gzip.BadGzipFile,
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as error:
+                failure = SnapshotReadFailure(
+                    entity=entity,
+                    path=relative,
+                    error=type(error).__name__,
+                    message=str(error),
+                    records_read=records_read,
+                )
+                self.read_failures.append(failure)
+                logger.error(
+                    "skipping unreadable OpenAlex part %s after %s records: %s",
+                    path,
+                    records_read,
+                    error,
+                )
+                if self.strict:
+                    raise
+
+    def failures_for(self, entity: str) -> list[SnapshotReadFailure]:
+        return [failure for failure in self.read_failures if failure.entity == entity]
 
     def iter_works(self, *, max_works: int | None = None) -> Iterator[OpenAlexWork]:
         count = 0
         for raw, relative, line_number in self.iter_raw("works"):
             try:
-                work = OpenAlexWork.from_raw(
-                    raw, snapshot_file=relative, snapshot_line=line_number
-                )
+                work = OpenAlexWork.from_raw(raw, snapshot_file=relative, snapshot_line=line_number)
             except ValueError:
                 logger.warning(
                     "skipping Work with invalid ID",

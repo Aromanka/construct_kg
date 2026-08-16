@@ -98,6 +98,11 @@ def _add_selection(parser: argparse.ArgumentParser) -> None:
         "--enrich-sources", action="store_true", help="Join full records from data/sources"
     )
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
+    parser.add_argument(
+        "--strict-snapshot",
+        action="store_true",
+        help="Abort on a corrupt/truncated snapshot part instead of recording and skipping it",
+    )
 
 
 def _add_materialization(parser: argparse.ArgumentParser) -> None:
@@ -159,6 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("work_ids", nargs="+")
     _add_workspace(add)
     add.add_argument("--max-works", type=_positive)
+    add.add_argument(
+        "--strict-snapshot",
+        action="store_true",
+        help="Abort on a corrupt/truncated snapshot part",
+    )
 
     materialize = commands.add_parser(
         "materialize", help="Prepare selected catalog Works as KG documents"
@@ -323,7 +333,10 @@ async def _run(args: argparse.Namespace) -> Any:
                 result[key.removesuffix("_json")] = json.loads(result.pop(key))
             return result
 
-    snapshot = OpenAlexSnapshot(args.snapshot)
+    snapshot = OpenAlexSnapshot(
+        args.snapshot,
+        strict=bool(getattr(args, "strict_snapshot", False)),
+    )
     with _catalog(args.workspace) as catalog:
         pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=args.workspace)
         if args.command == "add":

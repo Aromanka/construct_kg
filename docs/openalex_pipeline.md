@@ -15,22 +15,25 @@ openalex-snapshot/
 
 程序会扫描所有 `updated_date=*` 分区，并且只接受严格匹配 `part_数字.gz` 的文件；
 `part_0001.gz.ABC123` 一类异常副本不会被读取。gzip 文件按 JSONL 逐行解压，不会全量
-解压快照。
+解压快照。合法命名但被截断或损坏的 gzip 分片会记录错误并跳过，后续分片继续处理；
+最终 `selection.snapshot_failures` 会列出路径、异常类型和损坏前读取的记录数。若任务要求
+任一分片损坏都立即终止，增加 `--strict-snapshot`。
+
+跳过损坏分片只能保证批处理继续运行，不能恢复其中缺失的论文。应使用 `gzip -t` 定位并从
+原始快照重新复制损坏文件，然后利用 catalog 的幂等更新能力重新运行筛选。
 
 ## 一次运行
 
 仅使用确定性过滤并准备文档：
 
 ```powershell
-E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot `
-  --keyword diabetes `
-  --keyword "voice analysis" `
-  --keyword-mode any `
-  --exclude-keyword review `
-  --source "Journal of Voice" `
-  --require-fulltext `
-  --fulltext-dir D:\openalex-fulltext `
-  --enrich-sources `
+E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabetes/openalex/batch_000 \
+  --keyword diabetes \
+  --keyword "voice" \
+  --keyword-mode any \
+  --exclude-keyword review \
+  --require-abstract \
+  --enrich-sources \
   --workspace data/openalex
 ```
 

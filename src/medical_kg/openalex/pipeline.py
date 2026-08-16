@@ -43,6 +43,8 @@ class SelectionStatistics:
     selected_with_fulltext_hint: int = 0
     selected_without_fulltext_hint: int = 0
     selected_with_abstract_and_fulltext_hint: int = 0
+    snapshot_parts_failed: int = 0
+    snapshot_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -182,6 +184,9 @@ class OpenAlexPipeline:
                         break
             await flush()
         finally:
+            failures = self.snapshot.failures_for("works")
+            statistics.snapshot_parts_failed = len(failures)
+            statistics.snapshot_failures = [asdict(failure) for failure in failures]
             self.catalog.finish_run(
                 run_id,
                 scanned=statistics.scanned,

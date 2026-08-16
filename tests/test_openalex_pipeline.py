@@ -101,6 +101,19 @@ def _snapshot(tmp_path: Path) -> Path:
     return root
 
 
+def _snapshot_with_truncated_part(tmp_path: Path) -> Path:
+    root = tmp_path / "truncated-snapshot"
+    works = root / "data" / "works" / "updated_date=2025-01-01"
+    works.mkdir(parents=True)
+    broken = works / "part_0000.gz"
+    with gzip.open(broken, "wt", encoding="utf-8") as stream:
+        stream.write(json.dumps(_work("W20", "Before truncation", "diabetes voice")) + "\n")
+    broken.write_bytes(broken.read_bytes()[:-8])
+    with gzip.open(works / "part_0001.gz", "wt", encoding="utf-8") as stream:
+        stream.write(json.dumps(_work("W21", "After truncation", "diabetes voice")) + "\n")
+    return root
+
+
 class _FakeScreener:
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
@@ -198,6 +211,26 @@ def test_snapshot_strictly_discovers_gzip_parts(tmp_path: Path) -> None:
     assert [work.work_id for work in snapshot.iter_works()] == ["W1", "W2", "W3"]
 
 
+def test_snapshot_skips_truncated_part_and_continues(tmp_path: Path) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot_with_truncated_part(tmp_path))
+
+    work_ids = [work.work_id for work in snapshot.iter_works()]
+
+    assert "W21" in work_ids
+    failures = snapshot.failures_for("works")
+    assert len(failures) == 1
+    assert failures[0].path.endswith("part_0000.gz")
+    assert failures[0].error == "EOFError"
+    assert failures[0].records_read == 1
+
+
+def test_snapshot_strict_mode_raises_for_truncated_part(tmp_path: Path) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot_with_truncated_part(tmp_path), strict=True)
+
+    with pytest.raises(EOFError):
+        list(snapshot.iter_works())
+
+
 @pytest.mark.asyncio
 async def test_select_applies_default_medical_field_gate(tmp_path: Path) -> None:
     snapshot = OpenAlexSnapshot(_snapshot(tmp_path))
@@ -237,6 +270,22 @@ async def test_selection_reports_abstract_and_fulltext_availability(
     assert statistics.selected_with_fulltext_hint == 2
     assert statistics.selected_without_fulltext_hint == 1
     assert statistics.selected_with_abstract_and_fulltext_hint == 2
+
+
+@pytest.mark.asyncio
+async def test_selection_reports_skipped_snapshot_parts(tmp_path: Path) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot_with_truncated_part(tmp_path))
+    workspace = tmp_path / "truncated-feature"
+    with OpenAlexCatalog(workspace / "catalog.sqlite3") as catalog:
+        pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=workspace)
+        statistics = await pipeline.select(
+            SelectionOptions(work_filter=WorkFilter(allowed_field_ids=None))
+        )
+
+    assert statistics.selected == 2
+    assert statistics.snapshot_parts_failed == 1
+    assert statistics.snapshot_failures[0]["error"] == "EOFError"
+    assert statistics.snapshot_failures[0]["records_read"] == 1
 
 
 @pytest.mark.asyncio
