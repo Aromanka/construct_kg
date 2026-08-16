@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import sqlite3
 from pathlib import Path
 
+import httpx
 import pytest
 
 from medical_kg.openalex.catalog import OpenAlexCatalog
@@ -81,11 +83,7 @@ def _snapshot(tmp_path: Path) -> Path:
         json.dumps(
             {
                 "entries": [
-                    {
-                        "url": (
-                            "s3://openalex/data/works/updated_date=2025-01-01/part_0000.gz"
-                        )
-                    }
+                    {"url": ("s3://openalex/data/works/updated_date=2025-01-01/part_0000.gz")}
                 ]
             }
         ),
@@ -128,25 +126,53 @@ def test_cli_enables_medical_field_gate_and_treats_lone_id_as_explicit() -> None
         MEDICAL_BROAD_FIELDS
     )
 
-    disabled = parser.parse_args(
-        ["select", "snapshot", "--no-medical-field-filter"]
-    )
+    disabled = parser.parse_args(["select", "snapshot", "--no-medical-field-filter"])
     with pytest.raises(ValueError, match="At least one filter"):
         _selection_options(disabled)
 
     explicit = parser.parse_args(["select", "snapshot", "--include-id", "W1"])
     assert _selection_options(explicit).max_candidates == 0
 
+    require_abstract = parser.parse_args(["select", "snapshot", "--require-abstract"])
+    assert _selection_options(require_abstract).work_filter.require_abstract is True
+
+
+def test_cli_defaults_to_downloading_and_processing_fulltext() -> None:
+    args = build_parser().parse_args(["materialize", "snapshot"])
+
+    assert args.content_mode == "fulltext"
+    assert args.download_fulltext is True
+    assert args.abstract_chunk_size == 12000
+
+    offline = build_parser().parse_args(["materialize", "snapshot", "--no-download-fulltext"])
+    assert offline.download_fulltext is False
+
+
+def test_catalog_migrates_separate_processing_columns(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """CREATE TABLE works (
+            work_id TEXT PRIMARY KEY,
+            doi TEXT,
+            selected INTEGER NOT NULL DEFAULT 0,
+            materialized_path TEXT
+        )"""
+    )
+    connection.commit()
+    connection.close()
+
+    with OpenAlexCatalog(path) as catalog:
+        columns = {str(row[1]) for row in catalog.connection.execute("PRAGMA table_info(works)")}
+
+    assert {"abstract_processed", "fulltext_processed"} <= columns
+
 
 def test_default_field_gate_accepts_only_medical_and_biomedical_fields() -> None:
     assert MEDICAL_BROAD_FIELDS == frozenset({13, 24, 27, 28, 30, 36})
     medical = OpenAlexWork.from_raw(_work("W10", "Medical", "abstract", field_id=27))
-    biomedical = OpenAlexWork.from_raw(
-        _work("W11", "Biomedical", "abstract", field_id=30)
-    )
-    unrelated = OpenAlexWork.from_raw(
-        _work("W12", "Astronomy", "abstract", field_id=17)
-    )
+    biomedical = OpenAlexWork.from_raw(_work("W11", "Biomedical", "abstract", field_id=30))
+    unrelated = OpenAlexWork.from_raw(_work("W12", "Astronomy", "abstract", field_id=17))
     missing = OpenAlexWork.from_raw(_work("W13", "Unknown", "abstract", field_id=None))
 
     work_filter = WorkFilter()
@@ -154,6 +180,15 @@ def test_default_field_gate_accepts_only_medical_and_biomedical_fields() -> None
     assert work_filter.match(biomedical)[0]
     assert not work_filter.match(unrelated)[0]
     assert not work_filter.match(missing)[0]
+
+
+def test_require_abstract_rejects_work_without_restored_abstract() -> None:
+    raw = _work("W14", "No abstract", "temporary")
+    raw.pop("abstract_inverted_index")
+    work = OpenAlexWork.from_raw(raw)
+
+    assert WorkFilter().match(work)[0]
+    assert not WorkFilter(require_abstract=True).match(work)[0]
 
 
 def test_snapshot_strictly_discovers_gzip_parts(tmp_path: Path) -> None:
@@ -174,9 +209,34 @@ async def test_select_applies_default_medical_field_gate(tmp_path: Path) -> None
         assert statistics.scanned == 3
         assert statistics.candidates == 2
         assert statistics.selected == 2
+        assert statistics.selected_with_abstract == 2
+        assert statistics.selected_without_abstract == 0
+        assert statistics.selected_with_fulltext_hint == 2
+        assert statistics.selected_without_fulltext_hint == 0
+        assert statistics.selected_with_abstract_and_fulltext_hint == 2
         assert catalog.get("W1") is not None
         assert catalog.get("W2") is None
         assert catalog.get("W3") is not None
+
+
+@pytest.mark.asyncio
+async def test_selection_reports_abstract_and_fulltext_availability(
+    tmp_path: Path,
+) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot(tmp_path))
+    workspace = tmp_path / "availability"
+    with OpenAlexCatalog(workspace / "catalog.sqlite3") as catalog:
+        pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=workspace)
+        statistics = await pipeline.select(
+            SelectionOptions(work_filter=WorkFilter(allowed_field_ids=None))
+        )
+
+    assert statistics.selected == 3
+    assert statistics.selected_with_abstract == 3
+    assert statistics.selected_without_abstract == 0
+    assert statistics.selected_with_fulltext_hint == 2
+    assert statistics.selected_without_fulltext_hint == 1
+    assert statistics.selected_with_abstract_and_fulltext_hint == 2
 
 
 @pytest.mark.asyncio
@@ -226,16 +286,92 @@ async def test_add_and_materialize_local_fulltext(tmp_path: Path) -> None:
         assert result.explicit_selected == 1
         resolver = FullTextResolver(output_dir=workspace / "fulltext", local_dir=local)
         try:
-            materialized = await pipeline.materialize(
-                resolver=resolver, content_mode="fulltext"
-            )
+            materialized = await pipeline.materialize(resolver=resolver, content_mode="fulltext")
         finally:
             await resolver.aclose()
 
         assert materialized.written == 1
-        payload = json.loads(
-            (workspace / "documents" / "W2.json").read_text(encoding="utf-8")
-        )
+        payload = json.loads((workspace / "documents" / "W2.json").read_text(encoding="utf-8"))
         assert payload["content"] == "Complete article body."
         assert payload["abstract"] == "galaxy formation"
         assert payload["sources"][0]["display_name"] == "Journal of Voice"
+
+
+@pytest.mark.asyncio
+async def test_abstract_mode_stacks_works_and_tracks_modes_separately(
+    tmp_path: Path,
+) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot(tmp_path))
+    workspace = tmp_path / "feature"
+    local = tmp_path / "fulltext"
+    local.mkdir()
+    (local / "W1.txt").write_text("Full text one.", encoding="utf-8")
+    (local / "W3.txt").write_text("Full text three.", encoding="utf-8")
+
+    with OpenAlexCatalog(workspace / "catalog.sqlite3") as catalog:
+        pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=workspace)
+        await pipeline.select(SelectionOptions())
+        abstract_resolver = FullTextResolver(output_dir=workspace / "fulltext")
+        try:
+            abstract_result = await pipeline.materialize(
+                resolver=abstract_resolver,
+                content_mode="abstract",
+                abstract_chunk_size=1000,
+            )
+        finally:
+            await abstract_resolver.aclose()
+
+        assert abstract_result.abstracts == 2
+        assert abstract_result.abstract_batches == 1
+        abstract_paths = catalog.selected_materialized_paths(content_mode="abstract")
+        assert len(abstract_paths) == 1
+        abstract_payload = json.loads(abstract_paths[0].read_text(encoding="utf-8"))
+        assert abstract_payload["openalex_work_ids"] == ["W1", "W3"]
+        assert len(abstract_payload["content"]) <= 1000
+        assert catalog.get("W1")["abstract_processed"] == 1
+        assert catalog.get("W1")["fulltext_processed"] == 0
+
+        fulltext_resolver = FullTextResolver(output_dir=workspace / "fulltext", local_dir=local)
+        try:
+            fulltext_result = await pipeline.materialize(
+                resolver=fulltext_resolver, content_mode="fulltext"
+            )
+        finally:
+            await fulltext_resolver.aclose()
+
+        assert fulltext_result.fulltext == 2
+        assert catalog.get("W1")["abstract_processed"] == 1
+        assert catalog.get("W1")["fulltext_processed"] == 1
+        assert catalog.selected_materialized_paths(content_mode="abstract") != (
+            catalog.selected_materialized_paths(content_mode="fulltext")
+        )
+
+
+class _QuotaClient:
+    async def get(self, url: str, **_: object) -> httpx.Response:
+        return httpx.Response(429, request=httpx.Request("GET", url))
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_fulltext_quota_failure_is_recorded_and_skipped(tmp_path: Path) -> None:
+    snapshot = OpenAlexSnapshot(_snapshot(tmp_path))
+    workspace = tmp_path / "feature"
+    with OpenAlexCatalog(workspace / "catalog.sqlite3") as catalog:
+        pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=workspace)
+        await pipeline.select(SelectionOptions())
+        resolver = FullTextResolver(output_dir=workspace / "fulltext", download=True)
+        assert resolver.client is not None
+        await resolver.client.aclose()
+        resolver.client = _QuotaClient()  # type: ignore[assignment]
+        try:
+            result = await pipeline.materialize(resolver=resolver, content_mode="fulltext")
+        finally:
+            await resolver.aclose()
+
+        assert result.written == 0
+        assert result.download_failed == 2
+        assert catalog.get("W1")["fulltext_status"] == "quota_unavailable"
+        assert catalog.get("W1")["fulltext_processed"] == 0

@@ -221,6 +221,9 @@ the full canonical entity index.
 `data/works/updated_date=*/part_*.gz`，默认按 OpenAlex Field 保留医学与生物医学文献，
 并支持标题/摘要关键词、source、全文可用性提示、
 分批 LLM 编号筛选、显式 Work ID 追加、正文准备，以及复用现有流水线抽取知识关系。
+正文处理与 OpenAlex 内容下载默认启用；下载因额度、鉴权或网络问题失败时会记录并跳过。
+`abstract` 模式会把多篇摘要堆叠到 `--abstract-chunk-size` 上限，并与全文分别记录处理状态。
+筛选支持 `--require-abstract` / `--require-fulltext`，并输出摘要与正文提示覆盖统计。
 
 ```powershell
 python openalex_pipeline.py run D:\openalex-snapshot `

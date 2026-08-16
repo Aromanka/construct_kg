@@ -47,6 +47,10 @@ class OpenAlexCatalog:
                 fulltext_path TEXT,
                 fulltext_status TEXT NOT NULL DEFAULT 'unresolved',
                 materialized_path TEXT,
+                abstract_processed INTEGER NOT NULL DEFAULT 0,
+                abstract_materialized_path TEXT,
+                fulltext_processed INTEGER NOT NULL DEFAULT 0,
+                fulltext_materialized_path TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS ix_openalex_works_selected ON works(selected);
@@ -68,6 +72,20 @@ class OpenAlexCatalog:
             );
             """
         )
+        # CREATE TABLE IF NOT EXISTS does not add columns to catalogs created by
+        # earlier releases. Keep the catalog forward-compatible in place.
+        existing_columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(works)")
+        }
+        migrations = {
+            "abstract_processed": "INTEGER NOT NULL DEFAULT 0",
+            "abstract_materialized_path": "TEXT",
+            "fulltext_processed": "INTEGER NOT NULL DEFAULT 0",
+            "fulltext_materialized_path": "TEXT",
+        }
+        for name, definition in migrations.items():
+            if name not in existing_columns:
+                self.connection.execute(f"ALTER TABLE works ADD COLUMN {name} {definition}")
         self.connection.commit()
 
     def close(self) -> None:
@@ -202,20 +220,55 @@ class OpenAlexCatalog:
                     result.add(str(source["id"]))
         return result
 
-    def selected_materialized_paths(self, *, limit: int | None = None) -> list[Path]:
-        sql = (
-            "SELECT materialized_path FROM works "
-            "WHERE selected=1 AND materialized_path IS NOT NULL ORDER BY work_id"
-        )
+    def selected_materialized_paths(
+        self, *, content_mode: str = "fulltext", limit: int | None = None
+    ) -> list[Path]:
+        if content_mode == "fulltext":
+            columns = ("fulltext_materialized_path",)
+        elif content_mode == "abstract":
+            columns = ("abstract_materialized_path",)
+        elif content_mode == "fulltext-or-abstract":
+            columns = ("fulltext_materialized_path", "abstract_materialized_path")
+        else:
+            raise ValueError("Invalid content_mode")
+        expressions = [
+            f"SELECT {column} AS path FROM works WHERE selected=1 AND {column} IS NOT NULL"
+            for column in columns
+        ]
+        sql = "SELECT DISTINCT path FROM (" + " UNION ALL ".join(expressions) + ") ORDER BY path"
         parameters: tuple[int, ...] = ()
         if limit is not None:
             sql += " LIMIT ?"
             parameters = (limit,)
         return [
-            Path(row[0])
+            Path(str(row[0]))
             for row in self.connection.execute(sql, parameters)
-            if Path(row[0]).is_file()
+            if Path(str(row[0])).is_file()
         ]
+
+    def set_fulltext_materialized(
+        self,
+        work_id: str,
+        *,
+        fulltext_path: str | None,
+        fulltext_status: str,
+        materialized_path: str | None,
+        processed: bool,
+    ) -> None:
+        self.connection.execute(
+            """UPDATE works SET fulltext_path=?, fulltext_status=?, materialized_path=?,
+               fulltext_materialized_path=?, fulltext_processed=?,
+               updated_at=CURRENT_TIMESTAMP WHERE work_id=?""",
+            (
+                fulltext_path,
+                fulltext_status,
+                materialized_path,
+                materialized_path,
+                int(processed),
+                normalize_work_id(work_id),
+            ),
+        )
+        self.connection.commit()
 
     def set_materialized(
         self,
@@ -225,9 +278,21 @@ class OpenAlexCatalog:
         fulltext_status: str,
         materialized_path: str | None,
     ) -> None:
-        self.connection.execute(
-            """UPDATE works SET fulltext_path=?, fulltext_status=?, materialized_path=?,
-               updated_at=CURRENT_TIMESTAMP WHERE work_id=?""",
-            (fulltext_path, fulltext_status, materialized_path, normalize_work_id(work_id)),
+        """Backward-compatible alias for full-text materialization records."""
+
+        self.set_fulltext_materialized(
+            work_id,
+            fulltext_path=fulltext_path,
+            fulltext_status=fulltext_status,
+            materialized_path=materialized_path,
+            processed=materialized_path is not None,
+        )
+
+    def set_abstract_materialized(self, work_ids: Iterable[str], *, materialized_path: str) -> None:
+        normalized = [(materialized_path, normalize_work_id(work_id)) for work_id in work_ids]
+        self.connection.executemany(
+            """UPDATE works SET abstract_materialized_path=?, abstract_processed=1,
+               materialized_path=?, updated_at=CURRENT_TIMESTAMP WHERE work_id=?""",
+            [(path, path, work_id) for path, work_id in normalized],
         )
         self.connection.commit()

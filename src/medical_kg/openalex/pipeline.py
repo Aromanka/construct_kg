@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,8 @@ from medical_kg.openalex.fulltext import FullTextResolver
 from medical_kg.openalex.models import OpenAlexWork, normalize_work_id
 from medical_kg.openalex.screening import WorkScreener
 from medical_kg.openalex.snapshot import OpenAlexSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,11 @@ class SelectionStatistics:
     candidates: int = 0
     selected: int = 0
     explicit_selected: int = 0
+    selected_with_abstract: int = 0
+    selected_without_abstract: int = 0
+    selected_with_fulltext_hint: int = 0
+    selected_without_fulltext_hint: int = 0
+    selected_with_abstract_and_fulltext_hint: int = 0
 
 
 @dataclass
@@ -42,6 +51,10 @@ class MaterializeStatistics:
     written: int = 0
     fulltext: int = 0
     abstract_fallback: int = 0
+    abstracts: int = 0
+    abstract_batches: int = 0
+    skipped_processed: int = 0
+    download_failed: int = 0
     skipped_no_content: int = 0
 
 
@@ -67,6 +80,20 @@ class OpenAlexPipeline:
         pending_ids = set(include_ids)
         statistics = SelectionStatistics()
         batch: list[tuple[OpenAlexWork, list[str]]] = []
+
+        def record_selected_content(work: OpenAlexWork) -> None:
+            has_abstract = bool(work.abstract and work.abstract.strip())
+            if has_abstract:
+                statistics.selected_with_abstract += 1
+            else:
+                statistics.selected_without_abstract += 1
+            if work.has_fulltext_hint:
+                statistics.selected_with_fulltext_hint += 1
+            else:
+                statistics.selected_without_fulltext_hint += 1
+            if has_abstract and work.has_fulltext_hint:
+                statistics.selected_with_abstract_and_fulltext_hint += 1
+
         run_id = self.catalog.start_run(
             {
                 "filter": asdict(options.work_filter),
@@ -83,9 +110,7 @@ class OpenAlexPipeline:
             if not batch:
                 return
             selected_indexes = (
-                await screener.screen(
-                    [work for work, _ in batch], options.llm_instruction or ""
-                )
+                await screener.screen([work for work, _ in batch], options.llm_instruction or "")
                 if options.llm_instruction and screener
                 else set(range(len(batch)))
             )
@@ -106,6 +131,7 @@ class OpenAlexPipeline:
                 )
                 if selected:
                     statistics.selected += 1
+                    record_selected_content(work)
             self.catalog.connection.commit()
             batch.clear()
 
@@ -122,6 +148,7 @@ class OpenAlexPipeline:
                     pending_ids.remove(work.work_id)
                     statistics.selected += 1
                     statistics.explicit_selected += 1
+                    record_selected_content(work)
                     if not pending_ids and options.max_candidates == 0:
                         break
                     continue
@@ -132,10 +159,7 @@ class OpenAlexPipeline:
                     if not pending_ids:
                         break
                     continue
-                if (
-                    options.max_selected is not None
-                    and statistics.selected >= options.max_selected
-                ):
+                if options.max_selected is not None and statistics.selected >= options.max_selected:
                     if not pending_ids:
                         break
                     continue
@@ -177,9 +201,7 @@ class OpenAlexPipeline:
         self.mark_manual(existing)
         missing = normalized - existing
         if not missing:
-            return SelectionStatistics(
-                selected=len(existing), explicit_selected=len(existing)
-            )
+            return SelectionStatistics(selected=len(existing), explicit_selected=len(existing))
         result = await self.select(
             SelectionOptions(
                 include_ids=missing,
@@ -227,14 +249,18 @@ class OpenAlexPipeline:
         self,
         *,
         resolver: FullTextResolver,
-        content_mode: str = "fulltext-or-abstract",
+        content_mode: str = "fulltext",
+        abstract_chunk_size: int = 12000,
         limit: int | None = None,
     ) -> MaterializeStatistics:
         if content_mode not in {"fulltext", "abstract", "fulltext-or-abstract"}:
             raise ValueError("Invalid content_mode")
+        if abstract_chunk_size < 1:
+            raise ValueError("abstract_chunk_size must be at least 1")
         output_dir = self.workspace / "documents"
         output_dir.mkdir(parents=True, exist_ok=True)
         statistics = MaterializeStatistics()
+        abstract_works: list[OpenAlexWork] = []
         for row in self.catalog.selected_rows(limit=limit):
             statistics.selected += 1
             work = OpenAlexWork.from_raw(
@@ -242,27 +268,52 @@ class OpenAlexPipeline:
                 snapshot_file=row["snapshot_file"],
                 snapshot_line=row["snapshot_line"],
             )
-            resolved = await resolver.resolve(work) if content_mode != "abstract" else None
-            full_text = resolved.text if resolved else None
-            if full_text:
-                statistics.fulltext += 1
-            if content_mode == "fulltext":
-                content = full_text
-            elif content_mode == "abstract":
-                content = work.abstract
-            else:
-                content = full_text or work.abstract
-                if not full_text and work.abstract:
-                    statistics.abstract_fallback += 1
-            if not content or not content.strip():
-                statistics.skipped_no_content += 1
-                self.catalog.set_materialized(
-                    work.work_id,
-                    fulltext_path=str(resolved.path) if resolved and resolved.path else None,
-                    fulltext_status=resolved.status if resolved else "not_requested",
-                    materialized_path=None,
-                )
+            if content_mode == "abstract":
+                if row["abstract_processed"]:
+                    statistics.skipped_processed += 1
+                elif work.abstract and work.abstract.strip():
+                    abstract_works.append(work)
+                else:
+                    statistics.skipped_no_content += 1
                 continue
+
+            if row["fulltext_processed"]:
+                statistics.skipped_processed += 1
+                continue
+            try:
+                resolved = await resolver.resolve(work)
+            except Exception as error:  # one bad Work must not stop a large snapshot batch
+                logger.warning("Skipping full text for %s: %s", work.work_id, error)
+                resolved = None
+            full_text = resolved.text if resolved else None
+            fulltext_status = resolved.status if resolved else "download_failed"
+            if not full_text or not full_text.strip():
+                if fulltext_status in {
+                    "download_failed",
+                    "quota_unavailable",
+                    "unauthorized",
+                }:
+                    statistics.download_failed += 1
+                self.catalog.set_fulltext_materialized(
+                    work.work_id,
+                    fulltext_path=(str(resolved.path) if resolved and resolved.path else None),
+                    fulltext_status=fulltext_status,
+                    materialized_path=None,
+                    processed=False,
+                )
+                if (
+                    content_mode == "fulltext-or-abstract"
+                    and not row["abstract_processed"]
+                    and work.abstract
+                    and work.abstract.strip()
+                ):
+                    abstract_works.append(work)
+                    statistics.abstract_fallback += 1
+                else:
+                    statistics.skipped_no_content += 1
+                continue
+
+            statistics.fulltext += 1
             document_path = output_dir / f"{work.work_id}.json"
             payload: dict[str, Any] = {
                 "document_id": work.document_id,
@@ -271,7 +322,8 @@ class OpenAlexPipeline:
                 "title": work.title,
                 "abstract": work.abstract,
                 "full_text": full_text,
-                "content": content,
+                "content": full_text,
+                "content_mode": "fulltext",
                 "doi": work.doi,
                 "publication_year": work.publication_year,
                 "language": work.language,
@@ -289,11 +341,105 @@ class OpenAlexPipeline:
             document_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            self.catalog.set_materialized(
+            self.catalog.set_fulltext_materialized(
                 work.work_id,
-                fulltext_path=str(resolved.path) if resolved and resolved.path else None,
-                fulltext_status=resolved.status if resolved else "not_requested",
+                fulltext_path=str(resolved.path) if resolved.path else None,
+                fulltext_status=resolved.status,
                 materialized_path=str(document_path),
+                processed=True,
             )
             statistics.written += 1
+
+        if abstract_works:
+            self._materialize_abstract_batches(
+                abstract_works,
+                output_dir=output_dir,
+                chunk_size=abstract_chunk_size,
+                statistics=statistics,
+            )
         return statistics
+
+    @staticmethod
+    def _abstract_section(work: OpenAlexWork) -> str:
+        return (
+            f"[OPENALEX WORK {work.work_id}]\n"
+            f"Title: {work.title}\n"
+            f"DOI: {work.doi or ''}\n"
+            f"Abstract:\n{(work.abstract or '').strip()}\n"
+            f"[/OPENALEX WORK {work.work_id}]"
+        )
+
+    def _materialize_abstract_batches(
+        self,
+        works: list[OpenAlexWork],
+        *,
+        output_dir: Path,
+        chunk_size: int,
+        statistics: MaterializeStatistics,
+    ) -> None:
+        batch_dir = output_dir / "abstract_batches"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        batch: list[tuple[OpenAlexWork, str]] = []
+        batch_length = 0
+
+        def flush() -> None:
+            nonlocal batch_length
+            if not batch:
+                return
+            content = "\n\n".join(section for _, section in batch)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:24]
+            document_path = batch_dir / f"abstract_batch_{digest}.json"
+            batch_works = [work for work, _ in batch]
+            payload: dict[str, Any] = {
+                "document_id": f"openalex:abstract-batch:{digest}",
+                "title": f"OpenAlex abstract batch ({len(batch_works)} works)",
+                "content": content,
+                "content_mode": "abstract",
+                "openalex_work_ids": [work.work_id for work in batch_works],
+                "works": [
+                    {
+                        "document_id": work.document_id,
+                        "openalex_work_id": work.work_id,
+                        "openalex_id": work.openalex_id,
+                        "title": work.title,
+                        "abstract": work.abstract,
+                        "doi": work.doi,
+                        "publication_year": work.publication_year,
+                        "sources": work.sources,
+                        "primary_source_id": work.primary_source_id,
+                        "primary_source_name": work.primary_source_name,
+                        "snapshot_locator": {
+                            "file": work.snapshot_file,
+                            "line": work.snapshot_line,
+                        },
+                    }
+                    for work in batch_works
+                ],
+                "source_type": "research",
+            }
+            document_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.catalog.set_abstract_materialized(
+                (work.work_id for work in batch_works),
+                materialized_path=str(document_path),
+            )
+            statistics.abstracts += len(batch_works)
+            statistics.abstract_batches += 1
+            statistics.written += 1
+            batch.clear()
+            batch_length = 0
+
+        for work in works:
+            section = self._abstract_section(work)
+            separator_length = 2 if batch else 0
+            if batch and batch_length + separator_length + len(section) > chunk_size:
+                flush()
+                separator_length = 0
+            batch.append((work, section))
+            batch_length += separator_length + len(section)
+            # An unusually long single abstract is kept intact so article boundaries
+            # and provenance are not lost; downstream character chunking can split it.
+            if len(section) >= chunk_size:
+                flush()
+        flush()

@@ -30,10 +30,12 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
   --source "Journal of Voice" `
   --require-fulltext `
   --fulltext-dir D:\openalex-fulltext `
-  --content-mode fulltext-or-abstract `
   --enrich-sources `
   --workspace data/openalex
 ```
+
+`run` 和 `materialize` 默认采用 `fulltext` 模式，并默认从 OpenAlex 内容服务下载正文；
+仅使用本地正文时增加 `--no-download-fulltext`。
 
 加入 LLM 筛选：
 
@@ -43,6 +45,7 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
   --llm-prompt "@prompts/my_openalex_screening.txt" `
   --llm-batch-size 20 `
   --content-mode abstract `
+  --abstract-chunk-size 12000 `
   --workspace data/openalex `
   --config config.yaml
 ```
@@ -78,6 +81,7 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
 - `--keyword-mode any|all`：任一关键词命中或所有关键词同时命中。
 - `--exclude-keyword`：命中任一排除词即丢弃。
 - `--source`：可重复；匹配 Work 内所有 `locations[].source` 的 ID、名称、类型等短字段。
+- `--require-abstract`：要求 Work 的 `abstract_inverted_index` 能恢复出非空摘要。
 - `--require-fulltext`：要求 Work 元数据具有 `has_content`、`has_fulltext` 或 `pdf_url` 提示。
 - `--llm-prompt`：在上述低成本过滤之后，批量筛查候选标题和摘要。
 - `--include-id W...`：无视普通过滤条件，始终加入指定 Work。
@@ -90,14 +94,22 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py run D:\openalex-snapshot
 若必须拥有实际正文，使用 `--content-mode fulltext`；无法解析到正文的 Work 会记录在 catalog，
 但不会生成待抽取 JSON 文档。
 
+每次 `select` 或 `run` 的 `selection` 输出都会报告选中文献的内容覆盖统计：
+`selected_with_abstract`、`selected_without_abstract`、`selected_with_fulltext_hint`、
+`selected_without_fulltext_hint` 和 `selected_with_abstract_and_fulltext_hint`。其中正文统计是
+OpenAlex 元数据提示；实际正文取得数量以 materialization 输出的 `fulltext` 为准。
+
 ## 正文与摘要
 
 摘要由 `abstract_inverted_index` 按位置恢复，并始终单独保存为 `abstract`。OpenAlex metadata
 snapshot 本身不是全文库，正文通过以下方式解析：
 
 1. `--fulltext-dir` 指定的本地目录；
-2. 显式使用 `--download-fulltext` 后，从 `content.openalex.org` 获取选中 Work 的 GROBID XML
-   或 PDF；需要凭证时通过 `--openalex-api-key` 或 `OPENALEX_API_KEY` 提供。
+2. 默认从 `content.openalex.org` 获取选中 Work 的 GROBID XML 或 PDF；需要凭证时通过
+   `--openalex-api-key` 或 `OPENALEX_API_KEY` 提供。使用 `--no-download-fulltext` 可关闭下载。
+
+额度不足、鉴权失败、限流、网络错误或单篇正文解析失败时，该 Work 会记录对应状态并跳过，
+不会中断后续 Work。额度或凭证恢复后可重新执行，失败的 Work 不会被标为已处理。
 
 本地正文采用稳定 Work ID 文件名，支持：
 
@@ -118,8 +130,13 @@ PDF 解析需要安装项目的 `pdf` 可选依赖。程序不会自动抓取任
 `--content-mode` 有三种模式：
 
 - `fulltext`：只生成实际取得正文的文档；
-- `abstract`：仅使用摘要，适合先做小成本关系抽取；
+- `abstract`：仅使用摘要；按 `--abstract-chunk-size`（默认 12000 字符）依次堆叠多篇
+  文章，当前批次再加入一篇就会超限时才开始下一批，以减少短文本请求数；
 - `fulltext-or-abstract`：优先正文，无正文时用摘要。
+
+catalog 对两条处理路径分别维护 `fulltext_processed` / `abstract_processed` 和对应的
+materialized path。成功准备摘要不会阻止之后处理同一 Work 的全文，反之亦然；重复执行同一
+模式时会跳过已准备的内容。单篇摘要本身超过上限时会保持完整，交由后续字符分块继续拆分。
 
 ## 稳定编号、增量追加与检索
 
@@ -165,7 +182,9 @@ E:\code\Env\envs\ml_env\python.exe openalex_pipeline.py materialize D:\openalex-
 data/openalex/
 ├── catalog.sqlite3
 ├── documents/
-│   └── W....json
+│   ├── W....json
+│   └── abstract_batches/
+│       └── abstract_batch_<hash>.json
 └── fulltext/
     ├── W....grobid-xml
     └── W....pdf

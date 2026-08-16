@@ -38,6 +38,7 @@ class WorkFilter:
     keyword_mode: str = "any"
     exclude_keywords: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    require_abstract: bool = False
     require_fulltext: bool = False
 
     def __post_init__(self) -> None:
@@ -62,16 +63,14 @@ class WorkFilter:
             )
             if not wanted:
                 return False, []
-        if any(
-            _normalize(keyword) in text
-            for keyword in self.exclude_keywords
-            if keyword.strip()
-        ):
+        if any(_normalize(keyword) in text for keyword in self.exclude_keywords if keyword.strip()):
             return False, []
         if self.sources:
             source_text = _normalize(json.dumps(work.sources, ensure_ascii=False))
             if not any(_normalize(selector) in source_text for selector in self.sources):
                 return False, []
+        if self.require_abstract and not (work.abstract and work.abstract.strip()):
+            return False, []
         if self.require_fulltext and not work.has_fulltext_hint:
             return False, []
         return True, matched

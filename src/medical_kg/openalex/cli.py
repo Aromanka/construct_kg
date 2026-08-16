@@ -69,6 +69,11 @@ def _add_selection(parser: argparse.ArgumentParser) -> None:
         "--source", action="append", default=[], help="Repeatable source ID/name/type selector"
     )
     parser.add_argument(
+        "--require-abstract",
+        action="store_true",
+        help="Require a non-empty restored abstract",
+    )
+    parser.add_argument(
         "--require-fulltext",
         action="store_true",
         help="Require a snapshot full-text availability hint",
@@ -99,16 +104,31 @@ def _add_materialization(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fulltext-dir", type=Path, help="Local W{id}.xml/.txt/.json/.pdf directory"
     )
-    parser.add_argument(
+    download = parser.add_mutually_exclusive_group()
+    download.add_argument(
         "--download-fulltext",
+        dest="download_fulltext",
         action="store_true",
-        help="Fetch selected content from content.openalex.org",
+        help="Fetch selected content from content.openalex.org (default)",
     )
+    download.add_argument(
+        "--no-download-fulltext",
+        dest="download_fulltext",
+        action="store_false",
+        help="Use only --fulltext-dir and disable OpenAlex content downloads",
+    )
+    parser.set_defaults(download_fulltext=True)
     parser.add_argument("--openalex-api-key", default=os.getenv("OPENALEX_API_KEY"))
     parser.add_argument(
         "--content-mode",
         choices=("fulltext", "abstract", "fulltext-or-abstract"),
-        default="fulltext-or-abstract",
+        default="fulltext",
+    )
+    parser.add_argument(
+        "--abstract-chunk-size",
+        type=_positive,
+        default=12000,
+        help="Maximum characters per stacked abstract document (default: 12000)",
     )
     parser.add_argument("--materialize-limit", type=_positive)
 
@@ -175,6 +195,7 @@ def _selection_options(args: argparse.Namespace) -> SelectionOptions:
             allowed_field_ids is not None,
             args.keyword,
             args.source,
+            args.require_abstract,
             args.require_fulltext,
             instruction,
             args.include_id,
@@ -189,6 +210,7 @@ def _selection_options(args: argparse.Namespace) -> SelectionOptions:
             args.field,
             args.keyword,
             args.source,
+            args.require_abstract,
             args.require_fulltext,
             instruction,
             args.select_all,
@@ -201,6 +223,7 @@ def _selection_options(args: argparse.Namespace) -> SelectionOptions:
             keyword_mode=args.keyword_mode,
             exclude_keywords=args.exclude_keyword,
             sources=args.source,
+            require_abstract=args.require_abstract,
             require_fulltext=args.require_fulltext,
         ),
         llm_instruction=instruction,
@@ -264,9 +287,7 @@ async def _extract(args: argparse.Namespace, documents: list[Path]) -> dict[str,
         await repository.engine.dispose()
 
 
-async def _materialize(
-    args: argparse.Namespace, pipeline: OpenAlexPipeline
-) -> dict[str, Any]:
+async def _materialize(args: argparse.Namespace, pipeline: OpenAlexPipeline) -> dict[str, Any]:
     resolver = FullTextResolver(
         output_dir=args.workspace.resolve() / "fulltext",
         local_dir=args.fulltext_dir,
@@ -277,6 +298,7 @@ async def _materialize(
         result = await pipeline.materialize(
             resolver=resolver,
             content_mode=args.content_mode,
+            abstract_chunk_size=args.abstract_chunk_size,
             limit=args.materialize_limit,
         )
         return asdict(result)
@@ -303,9 +325,7 @@ async def _run(args: argparse.Namespace) -> Any:
 
     snapshot = OpenAlexSnapshot(args.snapshot)
     with _catalog(args.workspace) as catalog:
-        pipeline = OpenAlexPipeline(
-            snapshot=snapshot, catalog=catalog, workspace=args.workspace
-        )
+        pipeline = OpenAlexPipeline(snapshot=snapshot, catalog=catalog, workspace=args.workspace)
         if args.command == "add":
             result = await pipeline.add(set(args.work_ids), max_works=args.max_works)
             return asdict(result)
@@ -329,7 +349,10 @@ async def _run(args: argparse.Namespace) -> Any:
             if args.extract:
                 output["knowledge_extraction"] = await _extract(
                     args,
-                    catalog.selected_materialized_paths(limit=args.materialize_limit),
+                    catalog.selected_materialized_paths(
+                        content_mode=args.content_mode,
+                        limit=args.materialize_limit,
+                    ),
                 )
         return output
 
