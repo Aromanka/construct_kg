@@ -40,3 +40,12 @@ python -m medical_kg run data/openalex/documents/abstract_batches \
 
 基于以上信息，简单改进当前的canonicalize算法，保留原先的逻辑，同时增加更有包容性的实体消融判断，尽可能增加消融量。同时，给出我重新运行canonicalize的指令。（当前版本项目中，canonicalize存在默认的断点续存，而我已经完全执行了旧版本canonicalize）
 
+---
+
+Currently I'm working on openalex knowledge graph construction (using @docs\openalex_pipeline.md pipeline ) and pnet construction ( using @src\pnet\README.md ). 
+
+For openalex construction, I visualizded the gold part by command: `python src/utils/sqlite_gold_to_neo4j.py all --sqlite data/medical_kg.sqlite3 --no-auth --clear --open-browser` . 
+I want to visualize the constructed pnet in the similar command, by creating a vew script. You can refer to @src\utils\sqlite_gold_to_neo4j.py .
+Howevery, you may just use the produced pnet files instead of using the sqlite3 database.
+
+

@@ -9,6 +9,7 @@ __pycache__/
 # SQL database
 *.db
 *.sql
+*.zip
 
 # Distribution / packaging
 .Python
@@ -154,3 +155,4 @@ data/openalex/
 src/medical_kg/db/migrations/*
 !src/medical_kg/db/migrations/003_canonicalization.sql
 src/medical_kg/db/migrations
+src/pnet/openalex_1
