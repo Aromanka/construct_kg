@@ -2,13 +2,22 @@
   "sqlite": "data/medical_kg.sqlite3",
   "output_dir": "src/pnet/pnet_output",
   "text_s": [
-    "acoustic voice characteristics"
+    "acoustic",
+    "voice",
+    "sound",
+    "dysphonia",
+    "dysarthria",
+    "rhinolalia",
+    "vocal",
+    "whisper"
   ],
   "text_t": [
-    "type 2 diabetes mellitus"
+    "type 2 diabetes",
+    "type 1 diabetes",
+    "gestational diabetes"
   ],
-  "source_max_hops": 1,
-  "target_max_hops": 1,
+  "source_max_hops": 2,
+  "target_max_hops": 2,
   "traversal_mode": "undirected",
   "dead_end_policy": "structural_carry",
   "max_nodes": 100000,
