@@ -1,21 +1,32 @@
 schema_version: pnet-graph-v1
 layers:
-- id: source_d000
+- id: step_000
   order: 0
-- id: source_d001
+- id: step_001
   order: 1
-- id: target_d001
+- id: step_002
   order: 2
-- id: target_d000
+- id: step_003
   order: 3
+- id: step_004
+  order: 4
+- id: step_005
+  order: 5
+- id: step_006
+  order: 6
+- id: step_007
+  order: 7
 nodes_file: nodes.tsv
 edges_file: edges.tsv
 algorithm:
-  name: dual_keyword_bfs_frontier_bridge
+  name: bounded_bidirectional_corridor_pnet
   version: '1.0'
+  max_layers: 8
+  max_hops: 7
+  corridor_rule: ds_plus_dt_le_h
+  layering: time_expanded_with_lateral_state
   traversal_mode: undirected
-  source_max_hops: 1
-  target_max_hops: 1
-  keyword_match: normalized_substring_any
-  dead_end_policy: structural_carry
-  bridge_policy: complete_bipartite
+  max_lateral_steps: 1
+  terminal_policy: structural_carry
+  overflow_policy: protected_backbone_degree_pruning
+  full_frontier_connection: false

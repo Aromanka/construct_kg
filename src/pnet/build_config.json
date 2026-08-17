@@ -1,4 +1,5 @@
 {
+  "algorithm": "bounded_bidirectional_corridor_pnet",
   "sqlite": "data/medical_kg.sqlite3",
   "output_dir": "src/pnet/pnet_output",
   "text_s": [
@@ -16,12 +17,25 @@
     "type 1 diabetes",
     "gestational diabetes"
   ],
+  "max_layers": 8,
+  "max_hops": 7,
+  "traversal_mode": "undirected",
+  "keep_all_progress_edges": true,
+  "allow_lateral_edges": true,
+  "max_lateral_steps": 1,
+  "allow_backward_edges": false,
+  "terminal_policy": "structural_carry",
+  "overflow_policy": "protected_backbone_degree_pruning",
+  "max_unique_entities": 5000,
+  "max_occurrence_nodes": 20000,
+  "max_entities_per_layer": 2000,
+  "max_edges_per_node": 64,
+  "max_edges": 200000,
+
   "source_max_hops": 2,
   "target_max_hops": 2,
-  "traversal_mode": "undirected",
   "dead_end_policy": "structural_carry",
   "max_nodes": 200000,
-  "max_edges": 4000000,
   "max_bridge_edges": 2000000,
   "kg_name": "medical_kg_gold"
 }

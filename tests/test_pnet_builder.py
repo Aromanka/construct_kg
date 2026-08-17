@@ -61,7 +61,8 @@ def _gold_fixture(path: Path) -> None:
                 ('type-2', 'related_to');
             INSERT INTO raw_assertions VALUES
                 ('raw-1', 0.8), ('raw-1b', 0.9), ('raw-2', 0.7),
-                ('raw-3', 0.95), ('raw-4', 0.85), ('raw-5', 0.6), ('raw-6', 0.5);
+                ('raw-3', 0.95), ('raw-4', 0.85), ('raw-5', 0.6),
+                ('raw-6', 0.5), ('raw-7', 0.88);
             INSERT INTO assertions VALUES
                 ('r1', 'raw-1', 'A', 'B', 'type-1'),
                 ('r1b', 'raw-1b', 'A', 'B', 'type-2'),
@@ -69,7 +70,8 @@ def _gold_fixture(path: Path) -> None:
                 ('r3', 'raw-3', 'U', 'T', 'type-1'),
                 ('r4', 'raw-4', 'W', 'U', 'type-1'),
                 ('r5', 'raw-5', 'A', 'X', 'type-2'),
-                ('r6', 'raw-6', 'B', 'B', 'type-2');
+                ('r6', 'raw-6', 'B', 'B', 'type-2'),
+                ('r7', 'raw-7', 'C', 'W', 'type-1');
             """
         )
 
@@ -87,6 +89,7 @@ def test_builds_complete_deterministic_pnet_with_carry_and_merged_evidence(
     first = tmp_path / "first"
     second = tmp_path / "second"
     common = dict(
+        algorithm="dual_keyword_bfs_frontier_bridge",
         sqlite=database,
         text_s=("heart sound", "cardiac auscultation"),
         text_t=("diabetes",),
@@ -137,6 +140,7 @@ def test_fails_instead_of_sampling_frontier_bridge(tmp_path: Path) -> None:
     database = tmp_path / "gold.sqlite3"
     _gold_fixture(database)
     config = BuildConfig(
+        algorithm="dual_keyword_bfs_frontier_bridge",
         sqlite=database,
         output_dir=tmp_path / "output",
         text_s=("heart sound", "cardiac auscultation"),
@@ -158,6 +162,7 @@ def test_directed_mode_uses_source_outbound_and_target_inbound(tmp_path: Path) -
 
     result = build_pnet(
         BuildConfig(
+            algorithm="dual_keyword_bfs_frontier_bridge",
             sqlite=database,
             output_dir=output,
             text_s=("heart sound", "cardiac auscultation"),
@@ -181,6 +186,7 @@ def test_fails_when_a_keyword_side_matches_nothing(tmp_path: Path) -> None:
     database = tmp_path / "gold.sqlite3"
     _gold_fixture(database)
     config = BuildConfig(
+        algorithm="dual_keyword_bfs_frontier_bridge",
         sqlite=database,
         output_dir=tmp_path / "output",
         text_s=("missing source",),
@@ -190,3 +196,98 @@ def test_fails_when_a_keyword_side_matches_nothing(tmp_path: Path) -> None:
     with pytest.raises(BuildError, match="起点关键词未匹配"):
         build_pnet(config)
     assert not config.output_dir.exists()
+
+
+def test_default_corridor_builds_only_real_bounded_path(tmp_path: Path) -> None:
+    database = tmp_path / "gold.sqlite3"
+    _gold_fixture(database)
+    output = tmp_path / "corridor"
+
+    result = build_pnet(
+        BuildConfig(
+            sqlite=database,
+            output_dir=output,
+            text_s=("heart sound",),
+            text_t=("diabetes",),
+            max_layers=6,
+            max_hops=5,
+            max_unique_entities=20,
+            max_occurrence_nodes=50,
+            max_entities_per_layer=20,
+        )
+    )
+
+    assert result.node_count == 6
+    assert result.edge_count == 5
+    assert result.bridge_edge_count == 0
+    assert result.manifest["algorithm"]["name"] == (
+        "bounded_bidirectional_corridor_pnet"
+    )
+    assert result.manifest["status"]["search_complete"] is True
+    edges = _rows(output / "edges.tsv")
+    assert {edge["edge_kind"] for edge in edges} == {"kg_progress"}
+    assert all(edge["evidence_relation_ids"] for edge in edges)
+
+
+def test_corridor_absorbs_early_terminal_with_carry(tmp_path: Path) -> None:
+    database = tmp_path / "gold.sqlite3"
+    _gold_fixture(database)
+    output = tmp_path / "corridor"
+
+    result = build_pnet(
+        BuildConfig(
+            sqlite=database,
+            output_dir=output,
+            text_s=("source frontier c",),
+            text_t=("diabetes",),
+            max_layers=5,
+            max_hops=4,
+        )
+    )
+
+    assert result.node_count == 5
+    assert result.edge_count == 4
+    edges = _rows(output / "edges.tsv")
+    assert sum(edge["edge_kind"] == "terminal_carry" for edge in edges) == 1
+    final = [node for node in _rows(output / "nodes.tsv") if node["layer"] == "step_004"]
+    assert len(final) == 1
+    assert final[0]["node_type"] == "structural_carry"
+
+
+def test_corridor_prunes_by_degree_without_aborting(tmp_path: Path) -> None:
+    database = tmp_path / "gold.sqlite3"
+    _gold_fixture(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO entities VALUES ('D', 'Alternate D', 'PHENOTYPE', NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO raw_assertions VALUES (?, ?)",
+            (("raw-8", 0.7), ("raw-9", 0.7)),
+        )
+        connection.executemany(
+            "INSERT INTO assertions VALUES (?, ?, ?, ?, ?)",
+            (
+                ("r8", "raw-8", "A", "D", "type-1"),
+                ("r9", "raw-9", "D", "C", "type-1"),
+            ),
+        )
+
+    result = build_pnet(
+        BuildConfig(
+            sqlite=database,
+            output_dir=tmp_path / "corridor",
+            text_s=("heart sound",),
+            text_t=("diabetes",),
+            max_layers=6,
+            max_hops=5,
+            max_unique_entities=6,
+            max_occurrence_nodes=50,
+            max_entities_per_layer=20,
+        )
+    )
+
+    assert result.manifest["corridor"]["candidate_unique_entity_count"] == 7
+    assert result.manifest["corridor"]["unique_entities_pruned"] == 1
+    assert result.manifest["status"]["search_complete"] is False
+    assert result.manifest["status"]["validation_passed"] is True

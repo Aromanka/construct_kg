@@ -1,59 +1,111 @@
 {
   "algorithm": {
-    "bridge_policy": "complete_bipartite",
-    "dead_end_policy": "structural_carry",
-    "deterministic_sort": "entity_id_then_relation_id",
-    "keyword_match_rule": "normalized_substring_any",
-    "name": "dual_keyword_bfs_frontier_bridge",
-    "normalization": "unicode_nfkc_lower_trim_whitespace_punctuation_v1",
-    "source_max_hops": 1,
-    "target_max_hops": 1,
+    "allow_backward_edges": false,
+    "allow_lateral_edges": true,
+    "corridor_rule": "ds_plus_dt_le_h",
+    "deterministic_sort": "score_then_entity_id",
+    "full_frontier_connection": false,
+    "keep_all_progress_edges": true,
+    "layering": "time_expanded_with_lateral_state",
+    "max_hops": 7,
+    "max_lateral_steps": 1,
+    "max_layers": 8,
+    "name": "bounded_bidirectional_corridor_pnet",
+    "overflow_policy": "protected_backbone_degree_pruning",
+    "terminal_policy": "structural_carry",
     "traversal_mode": "undirected",
     "version": "1.0"
   },
+  "corridor": {
+    "candidate_unique_entity_count": 104924,
+    "output_unique_real_entity_count": 2793,
+    "selected_unique_entity_count": 5000,
+    "unique_entities_pruned": 99924
+  },
+  "coverage": {
+    "retained_source_entity_count": 475,
+    "retained_terminal_entity_count": 418,
+    "source_entities_with_bounded_path": 475,
+    "target_entities_in_corridor": 720
+  },
   "graph": {
-    "actual_bridge_edge_count": 5956,
-    "carry_edge_count": 1,
-    "carry_node_count": 1,
-    "edge_count": 12238,
-    "expected_bridge_edge_count": 5956,
-    "layer_widths": [
-      1,
-      1,
-      5956,
-      332
+    "edge_count": 40388,
+    "lateral_edge_count": 18449,
+    "layer_unique_entity_widths": [
+      475,
+      504,
+      1555,
+      1894,
+      1700,
+      1369,
+      597,
+      418
     ],
-    "node_count": 6290,
-    "rejected_edge_record_count": 129444,
-    "source_frontier_count": 1,
-    "target_frontier_count": 5956
+    "layer_widths": [
+      475,
+      551,
+      1992,
+      2567,
+      2395,
+      1897,
+      978,
+      563
+    ],
+    "occurrence_node_count": 11418,
+    "progress_edge_count": 18091,
+    "rejected_edge_record_count": 214376,
+    "structural_bridge_edge_count": 0,
+    "terminal_carry_edge_count": 3848
   },
   "inputs": {
     "kg_content_hash": "sha256:b36ef9bc541b6d241d1f0b7a25156a34cdb4c5fee08b946f8346224f0bb04791",
     "kg_name": "medical_kg_gold",
     "kg_version": "sqlite-size-3710021632-mtime_ns-1786943864805367600",
     "text_s": [
-      "acoustic voice characteristics"
+      "acoustic",
+      "voice",
+      "sound",
+      "dysphonia",
+      "dysarthria",
+      "rhinolalia",
+      "vocal",
+      "whisper"
     ],
     "text_t": [
-      "type 2 diabetes mellitus"
+      "type 2 diabetes",
+      "type 1 diabetes",
+      "gestational diabetes"
     ]
   },
   "limits": {
-    "max_bridge_edges": 500000,
-    "max_edges": 1000000,
-    "max_nodes": 100000
+    "max_edges": 200000,
+    "max_edges_per_node": 64,
+    "max_entities_per_layer": 2000,
+    "max_occurrence_nodes": 20000,
+    "max_unique_entities": 5000
   },
   "matching": {
-    "source_match_record_count": 2,
-    "source_matched_entity_count": 1,
-    "target_match_record_count": 697,
-    "target_matched_entity_count": 332
+    "source_match_record_count": 1928,
+    "source_matched_entity_count": 930,
+    "target_match_record_count": 2204,
+    "target_matched_entity_count": 1038
   },
-  "schema_version": "dual-bfs-pnet-manifest-v1",
+  "pruning": {
+    "applied": true,
+    "candidate_edge_count": 40388,
+    "candidate_occurrence_node_count": 11418,
+    "edges_pruned": 0,
+    "occurrence_nodes_pruned": 0,
+    "per_node_arcs_pruned": 2937,
+    "progress_cap_overflow_nodes": 9,
+    "score": "log1p(corridor_degree)+keyword+0.25*confidence-0.05*(ds+dt)"
+  },
+  "schema_version": "bbc-pnet-manifest-v1",
   "status": {
     "bridge_complete": true,
-    "search_complete": true,
+    "corridor_extraction_complete": true,
+    "distance_search_complete": true,
+    "search_complete": false,
     "validation_passed": true
   }
 }

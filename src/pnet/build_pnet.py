@@ -10,6 +10,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -105,6 +106,19 @@ class BuildConfig:
     output_dir: Path
     text_s: tuple[str, ...]
     text_t: tuple[str, ...]
+    algorithm: str = "bounded_bidirectional_corridor_pnet"
+    max_layers: int = 8
+    max_hops: int = 7
+    keep_all_progress_edges: bool = True
+    allow_lateral_edges: bool = True
+    max_lateral_steps: int = 1
+    allow_backward_edges: bool = False
+    terminal_policy: str = "structural_carry"
+    overflow_policy: str = "protected_backbone_degree_pruning"
+    max_unique_entities: int = 5_000
+    max_occurrence_nodes: int = 20_000
+    max_entities_per_layer: int = 2_000
+    max_edges_per_node: int = 64
     source_max_hops: int = 1
     target_max_hops: int = 1
     traversal_mode: str = "undirected"
@@ -120,11 +134,48 @@ class BuildConfig:
             raise BuildError("text_s 和 text_t 均必须是非空关键词列表")
         if any(not normalize_text(value) for value in (*self.text_s, *self.text_t)):
             raise BuildError("关键词不能是空白文本")
+        if self.algorithm not in {
+            "bounded_bidirectional_corridor_pnet",
+            "dual_keyword_bfs_frontier_bridge",
+        }:
+            raise BuildError(
+                "algorithm 必须是 bounded_bidirectional_corridor_pnet 或 "
+                "dual_keyword_bfs_frontier_bridge"
+            )
+        if self.algorithm == "bounded_bidirectional_corridor_pnet":
+            if self.max_layers < 2 or self.max_hops < 1:
+                raise BuildError("BBC-PNet 的 max_layers 至少为 2，max_hops 至少为 1")
+            if self.max_layers != self.max_hops + 1:
+                raise BuildError("BBC-PNet 要求 max_layers = max_hops + 1")
+            if self.max_lateral_steps < 0:
+                raise BuildError("max_lateral_steps 不能小于 0")
+            if self.allow_backward_edges:
+                raise BuildError("BBC-PNet 当前不允许 backward edges")
+            if self.terminal_policy != "structural_carry":
+                raise BuildError("BBC-PNet 当前仅支持 structural_carry 终点策略")
+            if self.overflow_policy not in {
+                "fail",
+                "protected_backbone_degree_pruning",
+            }:
+                raise BuildError(
+                    "overflow_policy 必须是 fail 或 protected_backbone_degree_pruning"
+                )
+            corridor_limits = (
+                self.max_unique_entities,
+                self.max_occurrence_nodes,
+                self.max_entities_per_layer,
+                self.max_edges_per_node,
+            )
+            if min(corridor_limits) < 1:
+                raise BuildError("BBC-PNet 的所有规模限制必须大于 0")
         if self.source_max_hops < 0 or self.target_max_hops < 0:
             raise BuildError("BFS 最大跳数不能小于 0")
         if self.traversal_mode not in {"undirected", "directed"}:
             raise BuildError("traversal_mode 必须是 undirected 或 directed")
-        if self.dead_end_policy != "structural_carry":
+        if (
+            self.algorithm == "dual_keyword_bfs_frontier_bridge"
+            and self.dead_end_policy != "structural_carry"
+        ):
             raise BuildError("当前构建器仅支持保证关键词实体不丢失的 structural_carry 策略")
         if min(self.max_nodes, self.max_edges, self.max_bridge_edges) < 1:
             raise BuildError("max_nodes/max_edges/max_bridge_edges 均必须大于 0")
@@ -793,13 +844,35 @@ def _tsv_value(value: Any) -> Any:
 
 
 def _write_tsv(path: Path, fields: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(
-            stream, fieldnames=fields, delimiter="\t", lineterminator="\n", extrasaction="ignore"
-        )
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({field: _tsv_value(row.get(field, "")) for field in fields})
+    # Write each large audit table atomically.  Some Windows filesystems can
+    # transiently return EINVAL while replacing a recently scanned large TSV;
+    # bounded retries avoid leaving a partially overwritten model input.
+    materialized_rows = rows if isinstance(rows, Sequence) else list(rows)
+    temporary = path.with_name(f".{path.name}.tmp")
+    for attempt in range(3):
+        try:
+            with temporary.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(
+                    stream,
+                    fieldnames=fields,
+                    delimiter="\t",
+                    lineterminator="\n",
+                    extrasaction="ignore",
+                )
+                writer.writeheader()
+                for row in materialized_rows:
+                    writer.writerow(
+                        {
+                            field: _tsv_value(row.get(field, ""))
+                            for field in fields
+                        }
+                    )
+            temporary.replace(path)
+            return
+        except OSError as exc:
+            if exc.errno != 22 or attempt == 2:
+                raise
+            time.sleep(0.1 * (attempt + 1))
 
 
 def _node_row(node: Node) -> dict[str, Any]:
@@ -866,6 +939,14 @@ def _write_outputs(
 def build_pnet(config: BuildConfig) -> BuildResult:
     """Build, validate, and write a complete PNet output directory."""
     config = config.checked()
+    if config.algorithm == "bounded_bidirectional_corridor_pnet":
+        try:
+            from .corridor import build_corridor_pnet
+        except ImportError:  # Direct execution: python src/pnet/build_pnet.py
+            from corridor import build_corridor_pnet
+
+        return build_corridor_pnet(config)
+
     with _sqlite_connection(config.sqlite) as connection:
         _require_schema(connection)
         entities = _load_entities(connection)
@@ -1057,12 +1138,21 @@ def _config_from_args(args: argparse.Namespace) -> BuildConfig:
             raise BuildError("配置文件顶层必须是 JSON object")
         values.update(loaded)
     overrides = {
+        "algorithm": args.algorithm,
         "sqlite": args.sqlite,
         "output_dir": args.output_dir,
         "text_s": args.text_s,
         "text_t": args.text_t,
         "source_max_hops": args.source_max_hops,
         "target_max_hops": args.target_max_hops,
+        "max_layers": args.max_layers,
+        "max_hops": args.max_hops,
+        "max_lateral_steps": args.max_lateral_steps,
+        "max_unique_entities": args.max_unique_entities,
+        "max_occurrence_nodes": args.max_occurrence_nodes,
+        "max_entities_per_layer": args.max_entities_per_layer,
+        "max_edges_per_node": args.max_edges_per_node,
+        "overflow_policy": args.overflow_policy,
         "traversal_mode": args.traversal_mode,
         "max_nodes": args.max_nodes,
         "max_edges": args.max_edges,
@@ -1086,15 +1176,33 @@ def _config_from_args(args: argparse.Namespace) -> BuildConfig:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="从 Gold SQLite 构建 Dual-Keyword Bidirectional BFS PNet。"
+        description="从 Gold SQLite 构建 BBC-PNet（默认）或旧版前沿桥接 PNet。"
     )
     parser.add_argument("--config", type=Path, help="JSON 构建配置；命令行参数可覆盖其字段")
+    parser.add_argument(
+        "--algorithm",
+        choices=(
+            "bounded_bidirectional_corridor_pnet",
+            "dual_keyword_bfs_frontier_bridge",
+        ),
+    )
     parser.add_argument("--sqlite", type=Path, help="Gold SQLite 路径")
     parser.add_argument("--output-dir", type=Path, help="输出目录")
     parser.add_argument("--text-s", action="append", help="起点关键词；可重复")
     parser.add_argument("--text-t", action="append", help="终点关键词；可重复")
     parser.add_argument("--source-max-hops", type=int)
     parser.add_argument("--target-max-hops", type=int)
+    parser.add_argument("--max-layers", type=int)
+    parser.add_argument("--max-hops", type=int)
+    parser.add_argument("--max-lateral-steps", type=int)
+    parser.add_argument("--max-unique-entities", type=int)
+    parser.add_argument("--max-occurrence-nodes", type=int)
+    parser.add_argument("--max-entities-per-layer", type=int)
+    parser.add_argument("--max-edges-per-node", type=int)
+    parser.add_argument(
+        "--overflow-policy",
+        choices=("fail", "protected_backbone_degree_pruning"),
+    )
     parser.add_argument("--traversal-mode", choices=("undirected", "directed"))
     parser.add_argument("--max-nodes", type=int)
     parser.add_argument("--max-edges", type=int)
