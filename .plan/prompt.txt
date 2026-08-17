@@ -25,3 +25,18 @@ python -m medical_kg run data/openalex/documents/abstract_batches \
 ```
 
 如果我的openalex数据中更新了新数据，我能否继续运行这三条指令，带来知识增量处理？如果不行，我应该换什么指令？
+
+---
+
+当前kg的实验性预构建已经完成，当前任务聚焦利用gold图谱，构建pnet。请你在 @src\pnet 中实现脚本，满足 @src\pnet\requirement.md 的要求，产出必须的产物。具体的命令请存储到对应的文档中。
+
+---
+
+请你简单判断：当前canonicalize 时，消融实体的规则是什么？
+
+我理想中，消融实体的规则至少包含：假设两个entity.split(' ')后的集合相同，则二者属于同一实体。同时，比较时只保留英文字符与数字，其余符号自动过滤。（即为语序不影响等价）
+
+---
+
+基于以上信息，简单改进当前的canonicalize算法，保留原先的逻辑，同时增加更有包容性的实体消融判断，尽可能增加消融量。同时，给出我重新运行canonicalize的指令。（当前版本项目中，canonicalize存在默认的断点续存，而我已经完全执行了旧版本canonicalize）
+

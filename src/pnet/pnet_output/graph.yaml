@@ -1,0 +1,21 @@
+schema_version: pnet-graph-v1
+layers:
+- id: source_d000
+  order: 0
+- id: source_d001
+  order: 1
+- id: target_d001
+  order: 2
+- id: target_d000
+  order: 3
+nodes_file: nodes.tsv
+edges_file: edges.tsv
+algorithm:
+  name: dual_keyword_bfs_frontier_bridge
+  version: '1.0'
+  traversal_mode: undirected
+  source_max_hops: 1
+  target_max_hops: 1
+  keyword_match: normalized_substring_any
+  dead_end_policy: structural_carry
+  bridge_policy: complete_bipartite

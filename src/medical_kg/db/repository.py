@@ -14,10 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from medical_kg.db.models import (
     APIRateLimit,
+    Assertion,
+    AssertionEvidence,
     Base,
     Document,
     DocumentRevision,
+    Entity,
+    EntityAlias,
+    EntityExternalId,
     EntityMention,
+    EntityResolution,
     ExtractionChunk,
     ExtractionRun,
     ProcessingJob,
@@ -112,6 +118,20 @@ class KnowledgeRepository:
                             f"ADD COLUMN {column} {column_type}"
                         )
                     )
+
+    async def reset_canonicalization(self) -> None:
+        """Delete derived Silver/Gold state while preserving extraction inputs."""
+
+        async with self._write_session() as session:
+            for model in (
+                AssertionEvidence,
+                Assertion,
+                EntityResolution,
+                EntityExternalId,
+                EntityAlias,
+                Entity,
+            ):
+                await session.execute(delete(model))
 
     async def register_document(self, document: DocumentInput) -> tuple[bool, bool]:
         """Return ``(created, changed)`` and invalidate jobs if the content changed."""

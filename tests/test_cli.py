@@ -45,6 +45,7 @@ def test_canonicalize_parser_accepts_silver_options() -> None:
 
     assert args.command == "canonicalize"
     assert args.semantic is True
+    assert args.rebuild is False
     assert args.document_id == "doc-1"
     assert args.batch_size == 250
     assert args.progress_style == "bar"
@@ -53,6 +54,9 @@ def test_canonicalize_parser_accepts_silver_options() -> None:
         ["canonicalize", "--progress-style", "log"]
     )
     assert log_args.progress_style == "log"
+
+    rebuild_args = build_parser().parse_args(["canonicalize", "--rebuild"])
+    assert rebuild_args.rebuild is True
 
 
 def test_stats_parser_accepts_config() -> None:

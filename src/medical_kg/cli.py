@@ -227,6 +227,11 @@ async def _run_command(args: argparse.Namespace) -> Any:
             return await collect_knowledge_statistics(repository)
 
         if args.command == "canonicalize":
+            if args.rebuild and args.document_id:
+                raise ValueError("--rebuild cannot be combined with --document-id")
+            if args.rebuild:
+                await repository.create_schema()
+                await repository.reset_canonicalization()
             semantic = args.semantic or settings.canonicalization.semantic
             canonicalization_llm = create_llm_client(settings) if semantic else None
             pipeline = CanonicalizationPipeline(
@@ -351,6 +356,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--semantic",
         action="store_true",
         help="Use the configured LLM for ambiguous entity/relation candidates",
+    )
+    canonicalize.add_argument(
+        "--rebuild",
+        action="store_true",
+        help=(
+            "Discard all derived Silver/Gold canonicalization state and recompute it "
+            "from preserved extraction results"
+        ),
     )
     canonicalize.add_argument("--document-id")
     canonicalize.add_argument(

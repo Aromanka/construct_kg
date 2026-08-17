@@ -215,9 +215,20 @@ python -m medical_kg canonicalize --batch-size 500 --config config.yaml
 Smaller batches reduce repeated work after interruption; larger batches reduce commit overhead.
 For line-oriented server logs, disable the bars with `--progress-style log`.
 
-This mode merges only an unambiguous exact alias, type-compatible abbreviation, or curated
-high-precision synonym. Otherwise it creates a new canonical entity, because a false medical merge
-is more harmful than a false split. It never modifies `entity_mentions` or `raw_assertions`.
+This mode merges only an unambiguous exact alias, an order-insensitive normalized token set,
+type-compatible abbreviation, or curated high-precision synonym. Otherwise it creates a new
+canonical entity, because a false medical merge is more harmful than a false split. It never
+modifies `entity_mentions` or `raw_assertions`.
+
+After changing canonicalization rules, discard the previous Silver/Gold checkpoints and rebuild
+them from the preserved extraction results:
+
+```powershell
+python -m medical_kg canonicalize --rebuild --config config.yaml
+```
+
+`--rebuild` applies to the complete canonical graph and therefore cannot be combined with
+`--document-id`.
 
 To let the configured LLM decide among retrieved candidates and map relations that remain `OTHER`,
 opt in explicitly:

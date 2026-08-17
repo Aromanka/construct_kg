@@ -180,6 +180,59 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
 
 
 @pytest.mark.asyncio
+async def test_reset_canonicalization_preserves_extraction_and_allows_full_rebuild(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'rebuild.sqlite3').as_posix()}"
+    )
+    repository = KnowledgeRepository(engine)
+    try:
+        await repository.create_schema()
+        await _store_extraction(
+            repository,
+            tmp_path,
+            document_id="doc-rebuild-1",
+            content="Diabetic kidney disease was treated by finerenone.",
+            subject="diabetic kidney disease",
+            object_="finerenone",
+            relation="was treated by",
+        )
+        await _store_extraction(
+            repository,
+            tmp_path,
+            document_id="doc-rebuild-2",
+            content="Kidney disease diabetic was treated by finerenone.",
+            subject="kidney disease diabetic",
+            object_="finerenone",
+            relation="was treated by",
+        )
+        pipeline = CanonicalizationPipeline(
+            repository=repository,
+            vocabulary=["treats", "OTHER"],
+            prompts=PromptRegistry(Path(__file__).parents[1] / "prompts"),
+        )
+        first = await pipeline.run()
+        assert first.entities_created == 2
+        assert first.canonical_assertions_created == 1
+        assert first.duplicate_assertions_aggregated == 1
+
+        await repository.reset_canonicalization()
+        async with repository.sessions() as session:
+            assert await session.scalar(select(func.count()).select_from(RawAssertion)) == 2
+            assert await session.scalar(select(func.count()).select_from(Entity)) == 0
+            assert await session.scalar(select(func.count()).select_from(EntityResolution)) == 0
+            assert await session.scalar(select(func.count()).select_from(Assertion)) == 0
+            assert await session.scalar(select(func.count()).select_from(AssertionEvidence)) == 0
+
+        rebuilt = await pipeline.run()
+        assert rebuilt.entities_created == 2
+        assert rebuilt.canonical_assertions_created == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_canonicalization_resumes_after_resolution_batch_checkpoint(
     tmp_path: Path,
 ) -> None:

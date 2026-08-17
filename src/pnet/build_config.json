@@ -1,0 +1,18 @@
+{
+  "sqlite": "data/medical_kg.sqlite3",
+  "output_dir": "src/pnet/pnet_output",
+  "text_s": [
+    "acoustic voice characteristics"
+  ],
+  "text_t": [
+    "type 2 diabetes mellitus"
+  ],
+  "source_max_hops": 1,
+  "target_max_hops": 1,
+  "traversal_mode": "undirected",
+  "dead_end_policy": "structural_carry",
+  "max_nodes": 100000,
+  "max_edges": 1000000,
+  "max_bridge_edges": 500000,
+  "kg_name": "medical_kg_gold"
+}

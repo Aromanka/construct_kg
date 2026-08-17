@@ -1,0 +1,59 @@
+{
+  "algorithm": {
+    "bridge_policy": "complete_bipartite",
+    "dead_end_policy": "structural_carry",
+    "deterministic_sort": "entity_id_then_relation_id",
+    "keyword_match_rule": "normalized_substring_any",
+    "name": "dual_keyword_bfs_frontier_bridge",
+    "normalization": "unicode_nfkc_lower_trim_whitespace_punctuation_v1",
+    "source_max_hops": 1,
+    "target_max_hops": 1,
+    "traversal_mode": "undirected",
+    "version": "1.0"
+  },
+  "graph": {
+    "actual_bridge_edge_count": 5956,
+    "carry_edge_count": 1,
+    "carry_node_count": 1,
+    "edge_count": 12238,
+    "expected_bridge_edge_count": 5956,
+    "layer_widths": [
+      1,
+      1,
+      5956,
+      332
+    ],
+    "node_count": 6290,
+    "rejected_edge_record_count": 129444,
+    "source_frontier_count": 1,
+    "target_frontier_count": 5956
+  },
+  "inputs": {
+    "kg_content_hash": "sha256:b36ef9bc541b6d241d1f0b7a25156a34cdb4c5fee08b946f8346224f0bb04791",
+    "kg_name": "medical_kg_gold",
+    "kg_version": "sqlite-size-3710021632-mtime_ns-1786943864805367600",
+    "text_s": [
+      "acoustic voice characteristics"
+    ],
+    "text_t": [
+      "type 2 diabetes mellitus"
+    ]
+  },
+  "limits": {
+    "max_bridge_edges": 500000,
+    "max_edges": 1000000,
+    "max_nodes": 100000
+  },
+  "matching": {
+    "source_match_record_count": 2,
+    "source_matched_entity_count": 1,
+    "target_match_record_count": 697,
+    "target_matched_entity_count": 332
+  },
+  "schema_version": "dual-bfs-pnet-manifest-v1",
+  "status": {
+    "bridge_complete": true,
+    "search_complete": true,
+    "validation_passed": true
+  }
+}

@@ -25,6 +25,31 @@ def test_ambiguous_alias_is_not_merged() -> None:
     assert resolver.resolve("ABC", "GENE", candidates) is None
 
 
+def test_resolves_same_normalized_token_set_regardless_of_word_order() -> None:
+    resolver = ConservativeEntityResolver()
+    candidates = [
+        EntityCandidate("ENT_DKD", "diabetic kidney disease", "DISEASE"),
+        EntityCandidate("ENT_GENE", "diabetic kidney disease", "GENE"),
+    ]
+
+    decision = resolver.resolve_decision("Kidney-disease diabetic", "DISEASE", candidates)
+
+    assert decision.entity_id == "ENT_DKD"
+    assert decision.method == "token_set"
+    assert resolver.resolve("kidney disease diabetic", "GENE", candidates) == "ENT_GENE"
+    assert resolver.resolve("kidney disease diabetic", "DRUG", candidates) is None
+
+
+def test_ambiguous_token_set_is_not_merged() -> None:
+    resolver = ConservativeEntityResolver()
+    candidates = [
+        EntityCandidate("ENT_1", "alpha beta", "GENE"),
+        EntityCandidate("ENT_2", "beta alpha", "GENE"),
+    ]
+
+    assert resolver.resolve("alpha beta beta", "GENE", candidates) is None
+
+
 def test_resolves_medical_abbreviation_without_crossing_entity_types() -> None:
     resolver = ConservativeEntityResolver()
     candidates = [
@@ -63,6 +88,17 @@ def test_indexed_resolver_matches_deterministic_resolution_rules() -> None:
     assert resolver.resolve_decision("Type-II Diabetes", "DISEASE").entity_id == "ENT_DISEASE"
     assert resolver.resolve_decision("T2DM", "DISEASE").entity_id == "ENT_DISEASE"
     assert resolver.resolve_decision("T2DM", "PROTEIN").entity_id is None
+
+
+def test_indexed_resolver_matches_same_token_set_regardless_of_word_order() -> None:
+    resolver = IndexedEntityResolver(
+        [EntityCandidate("ENT_DKD", "diabetic kidney disease", "DISEASE")]
+    )
+
+    decision = resolver.resolve_decision("kidney disease diabetic", "DISEASE")
+
+    assert decision.entity_id == "ENT_DKD"
+    assert decision.method == "token_set"
 
 
 def test_indexed_resolver_updates_when_entities_and_aliases_are_added() -> None:

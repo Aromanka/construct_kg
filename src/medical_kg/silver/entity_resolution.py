@@ -14,6 +14,12 @@ def normalized_alias(value: str) -> str:
     return re.sub(r"[\W_]+", " ", value).strip()
 
 
+def token_set_key(value: str) -> frozenset[str]:
+    """Return an order-insensitive key for normalized entity words."""
+
+    return frozenset(normalized_alias(value).split())
+
+
 def abbreviation_key(value: str) -> str:
     """Return an acronym-like key (type 2 diabetes mellitus becomes t2dm)."""
 
@@ -176,6 +182,23 @@ class ConservativeEntityResolver:
         if len(exact_matches) > 1:
             return ResolutionDecision(None, "ambiguous", 0.0)
 
+        mention_token_set = token_set_key(mention)
+        token_set_matches = {
+            candidate.entity_id
+            for candidate in candidates
+            if candidate.entity_type == entity_type
+            and mention_token_set
+            and mention_token_set
+            in {
+                token_set_key(candidate.canonical_name),
+                *(token_set_key(alias) for alias in candidate.aliases),
+            }
+        }
+        if len(token_set_matches) == 1:
+            return ResolutionDecision(next(iter(token_set_matches)), "token_set", 1.0)
+        if len(token_set_matches) > 1:
+            return ResolutionDecision(None, "ambiguous", 0.0)
+
         abbreviation_matches: set[str] = set()
         for candidate in candidates:
             if candidate.entity_type != entity_type:
@@ -226,6 +249,9 @@ class IndexedEntityResolver:
         self._external_ids: defaultdict[str, set[str]] = defaultdict(set)
         self._entities_by_type: defaultdict[str, set[str]] = defaultdict(set)
         self._exact: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+        self._token_sets: defaultdict[
+            tuple[str, frozenset[str]], set[str]
+        ] = defaultdict(set)
         self._abbreviation_keys: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
         self._abbreviation_form_keys: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
         self._compact_forms: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
@@ -269,6 +295,13 @@ class IndexedEntityResolver:
         if len(exact_matches) > 1:
             return ResolutionDecision(None, "ambiguous", 0.0)
 
+        tokens = token_set_key(mention)
+        token_set_matches = self._token_sets[(entity_type, tokens)] if tokens else set()
+        if len(token_set_matches) == 1:
+            return ResolutionDecision(next(iter(token_set_matches)), "token_set", 1.0)
+        if len(token_set_matches) > 1:
+            return ResolutionDecision(None, "ambiguous", 0.0)
+
         compact = _compact(mention)
         short_key = abbreviation_key(mention)
         if _looks_like_abbreviation(mention):
@@ -300,10 +333,13 @@ class IndexedEntityResolver:
 
     def _index_form(self, entity_id: str, entity_type: str, form: str) -> None:
         normalized = normalized_alias(form)
+        tokens = token_set_key(form)
         compact = _compact(form)
         short_key = abbreviation_key(form)
         if normalized:
             self._exact[(entity_type, normalized)].add(entity_id)
+        if tokens:
+            self._token_sets[(entity_type, tokens)].add(entity_id)
         if short_key:
             self._abbreviation_keys[(entity_type, short_key)].add(entity_id)
         if compact:
