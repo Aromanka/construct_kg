@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from medical_kg.db.models import (
@@ -157,5 +157,56 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
         }
         assert relation == "treats"
         assert disease_name == "type 2 diabetes mellitus"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_queries_do_not_expand_mention_ids_into_parameters(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'snapshot.sqlite3').as_posix()}"
+    )
+    repository = KnowledgeRepository(engine)
+    try:
+        await repository.create_schema()
+        for index in range(5):
+            await _store_extraction(
+                repository,
+                tmp_path,
+                document_id=f"doc-{index}",
+                content=f"Disease {index} is treated with drug {index}.",
+                subject=f"Disease {index}",
+                object_=f"drug {index}",
+                relation="is treated with",
+            )
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def reject_large_parameter_lists(
+            _connection: object,
+            _cursor: object,
+            _statement: str,
+            parameters: object,
+            _context: object,
+            executemany: bool,
+        ) -> None:
+            if not executemany and isinstance(parameters, (list, tuple)):
+                assert len(parameters) <= 8
+
+        pipeline = CanonicalizationPipeline(
+            repository=repository,
+            vocabulary=["treats", "OTHER"],
+            prompts=PromptRegistry(Path(__file__).parents[1] / "prompts"),
+        )
+        snapshot = await pipeline._load_snapshot(document_id=None)
+        filtered = await pipeline._load_snapshot(document_id="doc-0")
+
+        assert len(snapshot["raw_assertions"]) == 5
+        assert len(snapshot["mentions"]) == 10
+        assert len(snapshot["documents"]) == 5
+        assert len(filtered["raw_assertions"]) == 1
+        assert len(filtered["mentions"]) == 2
+        assert len(filtered["documents"]) == 1
     finally:
         await engine.dispose()

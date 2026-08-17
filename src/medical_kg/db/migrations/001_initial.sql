@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS extraction_chunk_jobs (
     error_message TEXT,
     validated_output JSONB,
     raw_output JSONB,
+    model_provider VARCHAR(64),
+    model_name VARCHAR(255),
+    temperature DOUBLE PRECISION,
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -36,6 +39,12 @@ CREATE TABLE IF NOT EXISTS extraction_chunk_jobs (
 
 CREATE INDEX IF NOT EXISTS ix_extraction_chunks_job_status
     ON extraction_chunk_jobs(job_id, status);
+
+-- Additive upgrade for databases whose chunk table predates model provenance. The nullable
+-- columns deliberately preserve and reuse legacy SUCCESS checkpoints.
+ALTER TABLE extraction_chunk_jobs ADD COLUMN IF NOT EXISTS model_provider VARCHAR(64);
+ALTER TABLE extraction_chunk_jobs ADD COLUMN IF NOT EXISTS model_name VARCHAR(255);
+ALTER TABLE extraction_chunk_jobs ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS api_rate_limits (
     limiter_key VARCHAR(512) PRIMARY KEY,

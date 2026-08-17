@@ -178,6 +178,12 @@ class ExtractionChunk(Base, UpdatedTimestampMixin):
     error_message: Mapped[str | None] = mapped_column(Text)
     validated_output: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     raw_output: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # Nullable for checkpoints written before per-chunk model provenance was introduced.
+    # These fields are descriptive metadata, not part of checkpoint identity: changing a
+    # model must never invalidate an already successful chunk.
+    model_provider: Mapped[str | None] = mapped_column(String(64))
+    model_name: Mapped[str | None] = mapped_column(String(255))
+    temperature: Mapped[float | None] = mapped_column(Float)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     __table_args__ = (

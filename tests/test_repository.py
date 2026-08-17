@@ -2,13 +2,14 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from medical_kg.config import DatabaseSettings
-from medical_kg.db.models import Base, ExtractionRun, RawAssertion
+from medical_kg.db.models import Base, ExtractionChunk, ExtractionRun, RawAssertion
 from medical_kg.db.repository import ExtractionRunSpec, KnowledgeRepository
 from medical_kg.landing.chunking import chunk_document
+from medical_kg.llm.base import LLMResponse
 from medical_kg.models.assertion import ExtractionOutput
 from medical_kg.models.document import DocumentInput
 
@@ -33,6 +34,40 @@ def test_required_sqlite_tables_are_declared() -> None:
         "invalid_records",
     }
     assert expected <= set(Base.metadata.tables)
+    assert {"model_provider", "model_name", "temperature"} <= set(
+        ExtractionChunk.__table__.columns
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_schema_adds_nullable_model_metadata_to_legacy_chunk_table(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database.as_posix()}")
+    repository = KnowledgeRepository(engine)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "CREATE TABLE extraction_chunk_jobs ("
+                    "chunk_job_id VARCHAR(32) PRIMARY KEY, "
+                    "status VARCHAR(16) NOT NULL)"
+                )
+            )
+
+        await repository.create_schema()
+
+        async with engine.connect() as connection:
+            columns = {
+                row[1]
+                for row in (
+                    await connection.execute(text("PRAGMA table_info(extraction_chunk_jobs)"))
+                ).all()
+            }
+        assert {"model_provider", "model_name", "temperature"} <= columns
+    finally:
+        await engine.dispose()
 
 
 def test_database_settings_build_an_async_sqlite_url(tmp_path: Path) -> None:
@@ -86,11 +121,29 @@ async def test_sqlite_repository_lifecycle(tmp_path: Path) -> None:
         assert {job.document_id for job in jobs if job is not None} == {"doc-1", "doc-2"}
         job = jobs[0]
         assert job is not None
+        chunks = chunk_document(job.content)
         assert await repository.prepare_chunks(
             job=job,
             pass_name="general",
-            chunks=chunk_document(job.content),
+            chunks=chunks,
         ) == {}
+        await repository.start_chunk(job.job_id, 0, job.worker_id)
+        await repository.complete_chunk(
+            job.job_id,
+            0,
+            LLMResponse(output=ExtractionOutput(), raw_output={"ok": True}),
+            model_provider="provider-a",
+            model_name="model-a",
+            temperature=0.25,
+        )
+        stored = await repository.prepare_chunks(
+            job=job,
+            pass_name="general",
+            chunks=chunks,
+        )
+        assert stored[0].model_provider == "provider-a"
+        assert stored[0].model_name == "model-a"
+        assert stored[0].temperature == 0.25
 
         assert await repository.reserve_api_capacity(
             limiter_key="provider:model",

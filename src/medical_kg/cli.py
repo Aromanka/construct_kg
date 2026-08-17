@@ -121,6 +121,7 @@ async def _run_command(args: argparse.Namespace) -> Any:
             )
 
         if args.command == "extract":
+            await repository.create_schema()
             runner = _runner(settings, repository)
             return await runner.extract(
                 limit=args.limit,
@@ -130,6 +131,7 @@ async def _run_command(args: argparse.Namespace) -> Any:
             )
 
         if args.command == "run":
+            await repository.create_schema()
             runner = _runner(settings, repository)
             source = args.source.resolve() if args.source else None
             ingest_bar = None

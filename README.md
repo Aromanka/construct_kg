@@ -265,7 +265,12 @@ The SQLite file is authoritative. Prompt files live in `prompts/`, runtime confi
 The complete provider response is stored once on its `extraction_runs` row. Individual
 `raw_assertions` retain only the structured assertion, evidence, qualifiers, validation state, and
 provenance; they do not repeat the complete response. Chunk checkpoints keep their validated and
-raw result so interrupted extraction can resume without another API request.
+raw result so interrupted extraction can resume without another API request. Each new checkpoint
+also records its model provider, actual model name, and temperature. Model metadata is descriptive
+and is deliberately excluded from checkpoint identity, so changing models resumes from successful
+chunks instead of reprocessing them. Legacy checkpoints without these nullable metadata fields are
+still treated as successful and are never requested again.
+`run` and `extract` apply this additive checkpoint-schema upgrade automatically.
 
 ## Development
 
@@ -297,6 +302,13 @@ Gold 规范化图；Bronze 原始图作为独立诊断视图保留，不应据�
 
 ```powershell
 python src/utils/sqlite_to_neo4j.py all --no-auth --clear --open-browser
+```
+
+如果数据库较大且只需查看 Gold 规范化图，使用 Gold-only 入口。它跳过 Bronze、文档正文和
+任务表，并用分批删除实现 `--clear`，以降低 Python 和 Neo4j 的内存压力：
+
+```powershell
+python src/utils/sqlite_gold_to_neo4j.py all --sqlite data/medical_kg.sqlite3 --no-auth --clear --open-browser
 ```
 
 如果 Neo4j 启用了身份验证，则设置密码后运行：

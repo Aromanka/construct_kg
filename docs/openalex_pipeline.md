@@ -111,6 +111,35 @@ python openalex_pipeline.py run /home/bml/storage/mnt/v-vmkfid4oobb3c0qh/xdiabet
 这会复用项目现有的分块、并发 LLM 抽取、断点续跑、Bronze/Silver/Gold 数据结构，不会另建
 一套关系格式。若筛选已经完成，优先使用上面的“两步命令”，避免重新扫描快照。
 
+## 生成 Gold 图谱并可视化
+
+OpenAlex 抽取结果首先写入主 SQLite 数据库的 Bronze 层。完成抽取后，运行以下命令进行实体消歧、
+关系规范化并生成 Gold 图谱：
+
+```bash
+python -m medical_kg canonicalize --config config.yaml
+```
+
+`canonicalize` 读取 `config.yaml` 中的 `database.path`。该路径必须与前面 OpenAlex 抽取实际写入的
+数据库一致；使用项目默认数据库 `data/medical_kg.sqlite3` 时，应确保配置为：
+
+```yaml
+database:
+  path: data/medical_kg.sqlite3
+```
+
+启动本地 Neo4j 后，只将同一个 SQLite 数据库中的 Gold 表导入 Neo4j，并启动项目自带的 Web
+可视化页面。该脚本不会导入 Bronze 原始关系、文档正文和任务记录，适合大型 OpenAlex 数据库：
+
+```bash
+python src/utils/sqlite_gold_to_neo4j.py all --sqlite data/medical_kg.sqlite3 --no-auth --clear --open-browser
+```
+
+页面默认打开 `http://127.0.0.1:8000`，其中默认视图为 Gold 规范化图。上述命令适用于已关闭
+Neo4j 身份验证的本地实例；若启用了身份验证，应去掉 `--no-auth`，并通过
+`NEO4J_PASSWORD` 环境变量或 `--password` 提供密码。转换脚本不会读取 `config.yaml`，所以
+`--sqlite` 必须与 `database.path` 指向同一个文件。
+
 ## 筛选规则
 
 - 默认顶层 Field 门控：从 Work 的 `topics[].field.id` 读取 OpenAlex Field，只保留

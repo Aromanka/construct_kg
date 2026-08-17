@@ -323,52 +323,58 @@ class CanonicalizationPipeline:
 
     async def _load_snapshot(self, *, document_id: str | None) -> dict[str, Any]:
         raw_statement = select(RawAssertion).order_by(RawAssertion.created_at)
+        subject_mentions = select(
+            RawAssertion.subject_mention_id.label("mention_id")
+        )
+        object_mentions = select(
+            RawAssertion.object_mention_id.label("mention_id")
+        )
+        document_ids = select(RawAssertion.document_id.label("document_id")).distinct()
         if document_id:
             raw_statement = raw_statement.where(RawAssertion.document_id == document_id)
+            subject_mentions = subject_mentions.where(
+                RawAssertion.document_id == document_id
+            )
+            object_mentions = object_mentions.where(
+                RawAssertion.document_id == document_id
+            )
+            document_ids = document_ids.where(RawAssertion.document_id == document_id)
+
+        # Keep large identifier sets inside SQLite. Expanding them into ``IN (?, ...)``
+        # parameters exceeds SQLITE_MAX_VARIABLE_NUMBER on realistically sized corpora.
+        mention_ids = subject_mentions.union(object_mentions).subquery()
+        document_ids = document_ids.subquery()
         async with self.repository.sessions() as session:
             raw_assertions = list((await session.scalars(raw_statement)).all())
-            mention_ids = {
-                mention_id
-                for raw in raw_assertions
-                for mention_id in (raw.subject_mention_id, raw.object_mention_id)
-            }
-            document_ids = {raw.document_id for raw in raw_assertions}
-            mentions = (
-                list(
-                    (
-                        await session.scalars(
-                            select(EntityMention).where(
-                                EntityMention.mention_id.in_(mention_ids)
-                            )
+            mentions = list(
+                (
+                    await session.scalars(
+                        select(EntityMention).join(
+                            mention_ids,
+                            EntityMention.mention_id == mention_ids.c.mention_id,
                         )
-                    ).all()
-                )
-                if mention_ids
-                else []
+                    )
+                ).all()
             )
-            documents = (
-                list(
-                    (
-                        await session.scalars(
-                            select(Document).where(Document.document_id.in_(document_ids))
+            documents = list(
+                (
+                    await session.scalars(
+                        select(Document).join(
+                            document_ids,
+                            Document.document_id == document_ids.c.document_id,
                         )
-                    ).all()
-                )
-                if document_ids
-                else []
+                    )
+                ).all()
             )
-            resolutions = (
-                list(
-                    (
-                        await session.scalars(
-                            select(EntityResolution).where(
-                                EntityResolution.mention_id.in_(mention_ids)
-                            )
+            resolutions = list(
+                (
+                    await session.scalars(
+                        select(EntityResolution).join(
+                            mention_ids,
+                            EntityResolution.mention_id == mention_ids.c.mention_id,
                         )
-                    ).all()
-                )
-                if mention_ids
-                else []
+                    )
+                ).all()
             )
             return {
                 "raw_assertions": raw_assertions,

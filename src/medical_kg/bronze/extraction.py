@@ -393,6 +393,14 @@ class BronzeExtractor:
                             "index": chunk.index,
                             "character_start": chunk.character_start,
                             "character_end": chunk.character_end,
+                            "model": {
+                                "provider": response.metadata.get("model_provider"),
+                                "name": response.metadata.get("model"),
+                                "temperature": response.metadata.get("temperature"),
+                                "legacy_metadata": response.metadata.get(
+                                    "legacy_model_metadata", False
+                                ),
+                            },
                             "raw_output": response.raw_output,
                         }
                         for chunk, response in responses
@@ -464,7 +472,13 @@ class BronzeExtractor:
                 raw_output=stored.raw_output,
                 input_tokens=stored.input_tokens,
                 output_tokens=stored.output_tokens,
-                metadata={"checkpoint": True},
+                metadata={
+                    "checkpoint": True,
+                    "model_provider": stored.model_provider,
+                    "model": stored.model_name,
+                    "temperature": stored.temperature,
+                    "legacy_model_metadata": stored.model_name is None,
+                },
             )
         await self.repository.start_chunk(job.job_id, chunk.index, job.worker_id)
 
@@ -475,7 +489,24 @@ class BronzeExtractor:
 
         try:
             response = await self.scheduler.submit(execute)
-            await self.repository.complete_chunk(job.job_id, chunk.index, response)
+            model_provider = str(self.settings.llm.provider)
+            model_name = str(response.metadata.get("model") or self.settings.llm.model)
+            temperature = float(self.settings.llm.temperature)
+            await self.repository.complete_chunk(
+                job.job_id,
+                chunk.index,
+                response,
+                model_provider=model_provider,
+                model_name=model_name,
+                temperature=temperature,
+            )
+            response.metadata.update(
+                {
+                    "model_provider": model_provider,
+                    "model": model_name,
+                    "temperature": temperature,
+                }
+            )
             return response
         except Exception as error:
             await self.repository.fail_chunk(

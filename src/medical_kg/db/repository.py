@@ -50,6 +50,9 @@ class StoredChunkResult:
     raw_output: dict[str, Any]
     input_tokens: int
     output_tokens: int
+    model_provider: str | None = None
+    model_name: str | None = None
+    temperature: float | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,27 @@ class KnowledgeRepository:
     async def create_schema(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            # create_all() does not add columns to an existing SQLite table. Keep this
+            # upgrade additive and nullable so legacy SUCCESS checkpoints remain reusable.
+            columns = {
+                row[1]
+                for row in (
+                    await connection.execute(text("PRAGMA table_info(extraction_chunk_jobs)"))
+                ).all()
+            }
+            additions = {
+                "model_provider": "VARCHAR(64)",
+                "model_name": "VARCHAR(255)",
+                "temperature": "FLOAT",
+            }
+            for column, column_type in additions.items():
+                if column not in columns:
+                    await connection.execute(
+                        text(
+                            f"ALTER TABLE extraction_chunk_jobs "
+                            f"ADD COLUMN {column} {column_type}"
+                        )
+                    )
 
     async def register_document(self, document: DocumentInput) -> tuple[bool, bool]:
         """Return ``(created, changed)`` and invalidate jobs if the content changed."""
@@ -330,6 +354,9 @@ class KnowledgeRepository:
                 raw_output=chunk.raw_output or {},
                 input_tokens=chunk.input_tokens,
                 output_tokens=chunk.output_tokens,
+                model_provider=chunk.model_provider,
+                model_name=chunk.model_name,
+                temperature=chunk.temperature,
             )
             for chunk in successful
         }
@@ -353,7 +380,14 @@ class KnowledgeRepository:
             )
 
     async def complete_chunk(
-        self, job_id: uuid.UUID, chunk_index: int, response: Any
+        self,
+        job_id: uuid.UUID,
+        chunk_index: int,
+        response: Any,
+        *,
+        model_provider: str,
+        model_name: str,
+        temperature: float,
     ) -> None:
         statement = (
             update(ExtractionChunk)
@@ -368,6 +402,9 @@ class KnowledgeRepository:
                 error_message=None,
                 validated_output=response.output.model_dump(mode="json"),
                 raw_output=response.raw_output,
+                model_provider=model_provider,
+                model_name=model_name,
+                temperature=temperature,
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
             )

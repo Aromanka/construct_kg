@@ -207,7 +207,7 @@ async def test_extractor_does_not_retry_permanent_http_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_successful_chunk_checkpoint_is_reused_without_an_api_request() -> None:
+async def test_successful_legacy_and_old_model_chunks_are_reused_after_model_switch() -> None:
     settings = SimpleNamespace(
         processing=SimpleNamespace(
             requests_per_minute=100_000,
@@ -233,7 +233,21 @@ async def test_successful_chunk_checkpoint_is_reused_without_an_api_request() ->
             raw_output={"checkpoint": 0},
             input_tokens=10,
             output_tokens=2,
-        )
+            # A legacy checkpoint has no model metadata but must still be reused.
+            model_provider=None,
+            model_name=None,
+            temperature=None,
+        ),
+        1: StoredChunkResult(
+            chunk_index=1,
+            validated_output={"assertions": []},
+            raw_output={"checkpoint": 1},
+            input_tokens=11,
+            output_tokens=3,
+            model_provider="old-provider",
+            model_name="old-model",
+            temperature=0.2,
+        ),
     }
     repository.complete_extraction.return_value = uuid4()
     llm = AsyncMock()
@@ -254,7 +268,7 @@ async def test_successful_chunk_checkpoint_is_reused_without_an_api_request() ->
         stage="extract:general",
         stage_version="extract:v1|chunk=1,overlap=0",
         retry_count=1,
-        content="ab",
+        content="abc",
         content_hash="0" * 64,
         source_type="research",
     )
@@ -264,7 +278,32 @@ async def test_successful_chunk_checkpoint_is_reused_without_an_api_request() ->
     assert result.documents_successful == 1
     assert result.requests == 1
     assert llm.extract_document.await_count == 1
-    repository.start_chunk.assert_awaited_once_with(job.job_id, 1, "")
+    repository.start_chunk.assert_awaited_once_with(job.job_id, 2, "")
+    completed = repository.complete_chunk.await_args
+    assert completed.kwargs == {
+        "model_provider": "test",
+        "model_name": "test-model",
+        "temperature": 0.0,
+    }
+    raw_chunks = repository.complete_extraction.await_args.kwargs["raw_output"]["chunks"]
+    assert raw_chunks[0]["model"] == {
+        "provider": None,
+        "name": None,
+        "temperature": None,
+        "legacy_metadata": True,
+    }
+    assert raw_chunks[1]["model"] == {
+        "provider": "old-provider",
+        "name": "old-model",
+        "temperature": 0.2,
+        "legacy_metadata": False,
+    }
+    assert raw_chunks[2]["model"] == {
+        "provider": "test",
+        "name": "test-model",
+        "temperature": 0.0,
+        "legacy_metadata": False,
+    }
 
 
 @pytest.mark.asyncio
