@@ -20,8 +20,8 @@
   "target_max_hops": 2,
   "traversal_mode": "undirected",
   "dead_end_policy": "structural_carry",
-  "max_nodes": 100000,
-  "max_edges": 1000000,
-  "max_bridge_edges": 500000,
+  "max_nodes": 200000,
+  "max_edges": 4000000,
+  "max_bridge_edges": 2000000,
   "kg_name": "medical_kg_gold"
 }

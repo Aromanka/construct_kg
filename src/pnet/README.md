@@ -23,12 +23,12 @@ python src/pnet/build_pnet.py --config src/pnet/build_config.json
 命令行参数可以覆盖 JSON 配置。例如重新选择关键词和跳数：
 
 ```powershell
-python src/pnet/build_pnet.py `
-  --config src/pnet/build_config.json `
-  --text-s "voice biomarkers" `
-  --text-t "type 2 diabetes mellitus" `
-  --source-max-hops 1 `
-  --target-max-hops 1 `
+python src/pnet/build_pnet.py \
+  --config src/pnet/build_config.json \
+  --text-s "voice biomarkers" \
+  --text-t "type 2 diabetes mellitus" \
+  --source-max-hops 1 \
+  --target-max-hops 1 \
   --output-dir src/pnet/pnet_output_custom
 ```
 
