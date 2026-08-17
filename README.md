@@ -202,9 +202,18 @@ Run deterministic, high-precision canonicalization after Bronze extraction:
 python -m medical_kg canonicalize --config config.yaml
 ```
 
-The command shows human-readable progress bars for database preparation, snapshot loading, entity
-resolution, relation normalization, fact aggregation, and persistence. For line-oriented server
-logs, disable the bars with `--progress-style log`.
+The command shows human-readable progress bars for database preparation, snapshot loading, indexed
+entity resolution, and canonical assertion materialization. Entity resolutions and Gold assertions
+are committed in durable batches. Pressing `Ctrl+C` keeps every completed batch; run the same
+command again to skip existing resolutions/evidence and resume the remaining work. The default
+batch size is 1000 and can be changed in `canonicalization.batch_size` or per invocation:
+
+```powershell
+python -m medical_kg canonicalize --batch-size 500 --config config.yaml
+```
+
+Smaller batches reduce repeated work after interruption; larger batches reduce commit overhead.
+For line-oriented server logs, disable the bars with `--progress-style log`.
 
 This mode merges only an unambiguous exact alias, type-compatible abbreviation, or curated
 high-precision synonym. Otherwise it creates a new canonical entity, because a false medical merge

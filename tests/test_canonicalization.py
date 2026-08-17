@@ -79,6 +79,7 @@ async def _store_extraction(
 @pytest.mark.asyncio
 async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{(tmp_path / 'canonical.sqlite3').as_posix()}"
@@ -110,6 +111,11 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
             prompts=PromptRegistry(Path(__file__).parents[1] / "prompts"),
         )
 
+        def reject_fuzzy_retrieval(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("non-semantic canonicalization must skip fuzzy retrieval")
+
+        monkeypatch.setattr(pipeline.retriever, "retrieve", reject_fuzzy_retrieval)
+
         progress_events: list[tuple[str, int, int, str]] = []
         first = await pipeline.run(progress=lambda *event: progress_events.append(event))
         second = await pipeline.run()
@@ -130,9 +136,7 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
             "Preparing database",
             "Loading canonicalization data",
             "Resolving entity mentions",
-            "Normalizing relations",
-            "Aggregating canonical facts",
-            "Writing canonical graph",
+            "Canonicalizing assertions",
         }
 
         async with repository.sessions() as session:
@@ -171,6 +175,121 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
         }
         assert relation == "treats"
         assert disease_name == "type 2 diabetes mellitus"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_canonicalization_resumes_after_resolution_batch_checkpoint(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'resolution-resume.sqlite3').as_posix()}"
+    )
+    repository = KnowledgeRepository(engine)
+    try:
+        await repository.create_schema()
+        for index in range(3):
+            await _store_extraction(
+                repository,
+                tmp_path,
+                document_id=f"resume-{index}",
+                content=f"Disease {index} is treated with drug {index}.",
+                subject=f"Disease {index}",
+                object_=f"drug {index}",
+                relation="is treated with",
+            )
+        pipeline = CanonicalizationPipeline(
+            repository=repository,
+            vocabulary=["treats", "OTHER"],
+            prompts=PromptRegistry(Path(__file__).parents[1] / "prompts"),
+            batch_size=2,
+        )
+
+        def interrupt_after_first_batch(
+            phase: str, completed: int, _total: int, _unit: str
+        ) -> None:
+            if phase == "Resolving entity mentions" and completed == 2:
+                raise InterruptedError("simulated Ctrl+C")
+
+        with pytest.raises(InterruptedError, match=r"simulated Ctrl\+C"):
+            await pipeline.run(progress=interrupt_after_first_batch)
+
+        async with repository.sessions() as session:
+            checkpointed = await session.scalar(
+                select(func.count()).select_from(EntityResolution)
+            )
+        assert checkpointed == 2
+
+        resumed = await pipeline.run()
+        assert resumed.mentions_resolved == 6
+        async with repository.sessions() as session:
+            resolutions = await session.scalar(
+                select(func.count()).select_from(EntityResolution)
+            )
+            evidence = await session.scalar(
+                select(func.count()).select_from(AssertionEvidence)
+            )
+        assert resolutions == 6
+        assert evidence == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_canonicalization_resumes_after_assertion_batch_checkpoint(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'assertion-resume.sqlite3').as_posix()}"
+    )
+    repository = KnowledgeRepository(engine)
+    try:
+        await repository.create_schema()
+        for index in range(2):
+            await _store_extraction(
+                repository,
+                tmp_path,
+                document_id=f"fact-{index}",
+                content=f"Disease {index} is treated with drug {index}.",
+                subject=f"Disease {index}",
+                object_=f"drug {index}",
+                relation="is treated with",
+            )
+        pipeline = CanonicalizationPipeline(
+            repository=repository,
+            vocabulary=["treats", "OTHER"],
+            prompts=PromptRegistry(Path(__file__).parents[1] / "prompts"),
+            batch_size=1,
+        )
+
+        def interrupt_after_first_batch(
+            phase: str, completed: int, _total: int, _unit: str
+        ) -> None:
+            if phase == "Canonicalizing assertions" and completed == 1:
+                raise InterruptedError("simulated Ctrl+C")
+
+        with pytest.raises(InterruptedError, match=r"simulated Ctrl\+C"):
+            await pipeline.run(progress=interrupt_after_first_batch)
+
+        async with repository.sessions() as session:
+            checkpointed_assertions = await session.scalar(
+                select(func.count()).select_from(Assertion)
+            )
+            checkpointed_evidence = await session.scalar(
+                select(func.count()).select_from(AssertionEvidence)
+            )
+        assert checkpointed_assertions == 1
+        assert checkpointed_evidence == 1
+
+        await pipeline.run()
+        async with repository.sessions() as session:
+            assertions = await session.scalar(select(func.count()).select_from(Assertion))
+            evidence = await session.scalar(
+                select(func.count()).select_from(AssertionEvidence)
+            )
+        assert assertions == 2
+        assert evidence == 2
     finally:
         await engine.dispose()
 
@@ -218,9 +337,9 @@ async def test_snapshot_queries_do_not_expand_mention_ids_into_parameters(
 
         assert len(snapshot["raw_assertions"]) == 5
         assert len(snapshot["mentions"]) == 10
-        assert len(snapshot["documents"]) == 5
+        assert snapshot["documents"] == {}
         assert len(filtered["raw_assertions"]) == 1
         assert len(filtered["mentions"]) == 2
-        assert len(filtered["documents"]) == 1
+        assert filtered["documents"] == {}
     finally:
         await engine.dispose()

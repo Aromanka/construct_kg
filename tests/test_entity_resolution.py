@@ -2,6 +2,7 @@ from medical_kg.silver.entity_resolution import (
     CandidateRetriever,
     ConservativeEntityResolver,
     EntityCandidate,
+    IndexedEntityResolver,
 )
 
 
@@ -45,3 +46,29 @@ def test_lexical_similarity_only_retrieves_a_candidate() -> None:
     result = retriever.retrieve("diabetes mellitus", "DISEASE", candidates)
 
     assert {item.candidate.entity_id for item in result} == {"ENT_T1D", "ENT_T2D"}
+
+
+def test_indexed_resolver_matches_deterministic_resolution_rules() -> None:
+    candidates = [
+        EntityCandidate(
+            "ENT_DISEASE",
+            "type 2 diabetes mellitus",
+            "DISEASE",
+            ("type II diabetes",),
+        ),
+        EntityCandidate("ENT_GENE", "type 2 diabetes mellitus", "GENE"),
+    ]
+    resolver = IndexedEntityResolver(candidates)
+
+    assert resolver.resolve_decision("Type-II Diabetes", "DISEASE").entity_id == "ENT_DISEASE"
+    assert resolver.resolve_decision("T2DM", "DISEASE").entity_id == "ENT_DISEASE"
+    assert resolver.resolve_decision("T2DM", "PROTEIN").entity_id is None
+
+
+def test_indexed_resolver_updates_when_entities_and_aliases_are_added() -> None:
+    resolver = IndexedEntityResolver()
+    resolver.add_candidate(EntityCandidate("ENT_NEW", "diabetic kidney disease", "DISEASE"))
+    resolver.add_alias("ENT_NEW", "DISEASE", "DKD")
+
+    assert resolver.resolve_decision("DKD", "DISEASE").entity_id == "ENT_NEW"
+    assert resolver.candidates("DISEASE")[0].aliases == ("DKD",)

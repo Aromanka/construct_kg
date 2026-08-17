@@ -1,5 +1,8 @@
+from collections.abc import Coroutine
 from pathlib import Path
+from typing import Any
 
+import medical_kg.cli as cli
 from medical_kg.cli import build_parser
 from medical_kg.config import ProcessingSettings
 
@@ -30,12 +33,20 @@ def test_run_parser_accepts_lightweight_module_command_options() -> None:
 
 def test_canonicalize_parser_accepts_silver_options() -> None:
     args = build_parser().parse_args(
-        ["canonicalize", "--semantic", "--document-id", "doc-1"]
+        [
+            "canonicalize",
+            "--semantic",
+            "--document-id",
+            "doc-1",
+            "--batch-size",
+            "250",
+        ]
     )
 
     assert args.command == "canonicalize"
     assert args.semantic is True
     assert args.document_id == "doc-1"
+    assert args.batch_size == 250
     assert args.progress_style == "bar"
 
     log_args = build_parser().parse_args(
@@ -63,3 +74,16 @@ def test_legacy_max_concurrency_is_migrated() -> None:
 
     assert settings.api_concurrency == 12
     assert settings.job_concurrency == 12
+
+
+def test_canonicalize_ctrl_c_reports_resumable_checkpoint(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    def interrupt(coroutine: Coroutine[Any, Any, Any]) -> Any:
+        coroutine.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_execute", interrupt)
+
+    assert cli.main(["canonicalize"]) == 130
+    assert "committed batches are safe" in capsys.readouterr().err

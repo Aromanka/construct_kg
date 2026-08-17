@@ -83,6 +83,7 @@ class CanonicalizationSettings(BaseModel):
     semantic: bool = False
     confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     candidate_top_k: int = Field(default=8, ge=1, le=50)
+    batch_size: int = Field(default=1000, ge=1, le=10_000)
 
 
 class PromptSettings(BaseModel):

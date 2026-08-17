@@ -43,6 +43,8 @@ canonicalization:
   semantic: false
   confidence_threshold: 0.85
   candidate_top_k: 8
+  # Each committed batch is a durable restart checkpoint.
+  batch_size: 1000
 
 prompts:
   directory: prompts

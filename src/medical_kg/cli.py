@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import sys
 from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import Any
@@ -238,6 +239,7 @@ async def _run_command(args: argparse.Namespace) -> Any:
                 semantic=semantic,
                 confidence_threshold=settings.canonicalization.confidence_threshold,
                 candidate_top_k=settings.canonicalization.candidate_top_k,
+                batch_size=args.batch_size or settings.canonicalization.batch_size,
             )
             canonicalization_bar = None
             canonicalization_phase = None
@@ -352,6 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     canonicalize.add_argument("--document-id")
     canonicalize.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        help="Durable checkpoint batch size (default: canonicalization.batch_size)",
+    )
+    canonicalize.add_argument(
         "--progress-style",
         choices=("bar", "log"),
         default="bar",
@@ -363,5 +370,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    _print(_execute(_run_command(args)))
+    try:
+        _print(_execute(_run_command(args)))
+    except KeyboardInterrupt:
+        message = (
+            "Canonicalization interrupted; committed batches are safe. "
+            "Run the same command to resume."
+            if args.command == "canonicalize"
+            else "Interrupted."
+        )
+        print(message, file=sys.stderr)
+        return 130
     return 0

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert
 
 from medical_kg.db.models import (
@@ -32,8 +32,8 @@ from medical_kg.silver.deduplication import (
 )
 from medical_kg.silver.entity_resolution import (
     CandidateRetriever,
-    ConservativeEntityResolver,
     EntityCandidate,
+    IndexedEntityResolver,
     ResolutionDecision,
     normalized_alias,
     preferred_canonical_name,
@@ -88,6 +88,12 @@ class _Fact:
     sources: list[dict[str, Any]]
 
 
+@dataclass
+class _AssertionRecord:
+    assertion_id: uuid.UUID
+    sources: list[dict[str, Any]]
+
+
 def _merge_sources(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[str, dict[str, Any]] = {}
     for group in groups:
@@ -116,15 +122,18 @@ class CanonicalizationPipeline:
         semantic: bool = False,
         confidence_threshold: float = 0.85,
         candidate_top_k: int = 8,
+        batch_size: int = 1000,
     ) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         self.repository = repository
         self.vocabulary = vocabulary
         self.prompts = prompts
         self.llm = llm
         self.semantic = semantic
         self.confidence_threshold = confidence_threshold
+        self.batch_size = batch_size
         self.retriever = CandidateRetriever(top_k=candidate_top_k)
-        self.resolver = ConservativeEntityResolver()
         self.relation_normalizer = ExactRelationNormalizer(vocabulary)
 
     async def run(
@@ -158,6 +167,18 @@ class CanonicalizationPipeline:
             external_ids[mapping.entity_id].append(
                 f"{mapping.namespace}:{mapping.accession}"
             )
+        indexed_resolver = IndexedEntityResolver(
+            [
+                EntityCandidate(
+                    entity_id=entity.entity_id,
+                    canonical_name=entity.canonical_name,
+                    entity_type=entity.entity_type,
+                    aliases=tuple(sorted(aliases[entity.entity_id])),
+                    external_ids=tuple(sorted(external_ids[entity.entity_id])),
+                )
+                for entity in entities.values()
+            ]
+        )
 
         mention_context: dict[uuid.UUID, RawAssertion] = {}
         for raw in raw_assertions:
@@ -168,46 +189,56 @@ class CanonicalizationPipeline:
         planned_aliases: set[tuple[str, str, str, float]] = set()
         planned_resolutions: list[_ResolutionRecord] = []
         resolution_map = dict(existing_resolutions)
+        resolution_cache: dict[tuple[str, str], str] = {}
         deterministic_matches = 0
         semantic_matches = 0
+        created_entities = 0
+        created_aliases = 0
 
-        ordered_mention_ids = sorted(mention_context, key=str)
-        mention_total = len(ordered_mention_ids)
-        self._report(progress, "Resolving entity mentions", 0, mention_total, "mention")
-        for mention_number, mention_id in enumerate(ordered_mention_ids, start=1):
-            if mention_id in resolution_map:
-                self._report(
-                    progress,
-                    "Resolving entity mentions",
-                    mention_number,
-                    mention_total,
-                    "mention",
-                )
-                continue
+        mention_total = len(mention_context)
+        pending_mention_ids = sorted(
+            (mention_id for mention_id in mention_context if mention_id not in resolution_map),
+            key=str,
+        )
+        checkpointed_mentions = mention_total - len(pending_mention_ids)
+        self._report(
+            progress,
+            "Resolving entity mentions",
+            checkpointed_mentions,
+            mention_total,
+            "mention",
+        )
+        for offset, mention_id in enumerate(pending_mention_ids, start=1):
+            mention_number = checkpointed_mentions + offset
             mention = mentions[mention_id]
-            candidates = self._candidates(
-                entities, aliases, external_ids, entity_type=mention.entity_type
-            )
-            retrieved = self.retriever.retrieve(
-                mention.mention_text, mention.entity_type, candidates
-            )
-            decision = self.resolver.resolve_decision(
-                mention.mention_text, mention.entity_type, candidates
-            )
+            cache_key = (mention.entity_type, normalized_alias(mention.mention_text))
+            cached_entity_id = resolution_cache.get(cache_key) if not self.semantic else None
+            retrieved: list[Any] = []
+            if cached_entity_id is not None:
+                decision = ResolutionDecision(cached_entity_id, "exact_alias", 1.0)
+            else:
+                decision = indexed_resolver.resolve_decision(
+                    mention.mention_text, mention.entity_type
+                )
             canonical_name = preferred_canonical_name(
                 mention.mention_text, mention.entity_type
             )
             if decision.entity_id is not None:
                 deterministic_matches += 1
-            elif self.semantic and retrieved:
-                decision, canonical_name = await self._semantic_entity_decision(
-                    mention=mention,
-                    raw=mention_context[mention_id],
-                    document=documents.get(mention.document_id),
-                    retrieved=retrieved,
+            elif self.semantic:
+                candidates = indexed_resolver.candidates(mention.entity_type)
+                retrieved = self.retriever.retrieve(
+                    mention.mention_text, mention.entity_type, candidates
                 )
-                if decision.entity_id is not None:
-                    semantic_matches += 1
+                if retrieved:
+                    decision, canonical_name = await self._semantic_entity_decision(
+                        mention=mention,
+                        raw=mention_context[mention_id],
+                        document=documents.get(mention.document_id),
+                        retrieved=retrieved,
+                    )
+                    if decision.entity_id is not None:
+                        semantic_matches += 1
 
             if decision.entity_id is None:
                 creation_method = (
@@ -230,6 +261,9 @@ class CanonicalizationPipeline:
                     )
                     entities[entity_id] = record
                     planned_entities[entity_id] = record
+                    indexed_resolver.add_candidate(
+                        EntityCandidate(entity_id, canonical_name, mention.entity_type)
+                    )
                 else:
                     entities[entity_id].sources = _merge_sources(
                         entities[entity_id].sources, list(mention.sources)
@@ -242,10 +276,16 @@ class CanonicalizationPipeline:
             if entity_id is None:
                 raise RuntimeError(f"Unable to resolve mention {mention_id}")
             resolution_map[mention_id] = entity_id
-            aliases[entity_id].add(mention.mention_text)
-            planned_aliases.add(
-                (entity_id, mention.mention_text, decision.method, decision.confidence)
-            )
+            if not self.semantic:
+                resolution_cache[cache_key] = entity_id
+            if mention.mention_text not in aliases[entity_id]:
+                aliases[entity_id].add(mention.mention_text)
+                indexed_resolver.add_alias(
+                    entity_id, mention.entity_type, mention.mention_text
+                )
+                planned_aliases.add(
+                    (entity_id, mention.mention_text, decision.method, decision.confidence)
+                )
             planned_resolutions.append(
                 _ResolutionRecord(
                     mention_id=mention_id,
@@ -266,6 +306,17 @@ class CanonicalizationPipeline:
                     ],
                 )
             )
+            if len(planned_resolutions) >= self.batch_size:
+                batch_entities, batch_aliases = await self._persist_resolution_batch(
+                    planned_entities=planned_entities,
+                    planned_aliases=planned_aliases,
+                    planned_resolutions=planned_resolutions,
+                )
+                created_entities += batch_entities
+                created_aliases += batch_aliases
+                planned_entities.clear()
+                planned_aliases.clear()
+                planned_resolutions.clear()
             self._report(
                 progress,
                 "Resolving entity mentions",
@@ -274,91 +325,99 @@ class CanonicalizationPipeline:
                 "mention",
             )
 
-        grouped: defaultdict[str, list[RawAssertion]] = defaultdict(list)
-        fact_values: dict[str, tuple[str, str, str, dict[str, Any], bool, bool]] = {}
-        relations_other = 0
-        assertion_total = len(raw_assertions)
-        self._report(progress, "Normalizing relations", 0, assertion_total, "assertion")
-        for assertion_number, raw in enumerate(raw_assertions, start=1):
-            subject_id = resolution_map.get(raw.subject_mention_id)
-            object_id = resolution_map.get(raw.object_mention_id)
-            if not subject_id or not object_id:
-                self._report(
-                    progress,
-                    "Normalizing relations",
-                    assertion_number,
-                    assertion_total,
-                    "assertion",
-                )
-                continue
-            relation = self.relation_normalizer.normalize(raw.detailed_relation)
-            if relation.canonical_relation.casefold() == "other" and self.semantic:
-                relation = await self._semantic_relation_decision(raw)
-            if relation.canonical_relation.casefold() == "other":
-                relations_other += 1
-            qualifiers = canonical_qualifiers(raw.qualifiers)
-            identity = normalized_assertion_identity(
-                subject_entity_id=subject_id,
-                canonical_relation_id=relation.canonical_relation,
-                object_entity_id=object_id,
-                qualifiers=qualifiers,
-                negated=raw.negated,
-                speculative=raw.speculative,
-            )
-            grouped[identity].append(raw)
-            fact_values[identity] = (
-                subject_id,
-                object_id,
-                relation.canonical_relation,
-                qualifiers,
-                raw.negated,
-                raw.speculative,
-            )
-            self._report(
-                progress,
-                "Normalizing relations",
-                assertion_number,
-                assertion_total,
-                "assertion",
-            )
+        batch_entities, batch_aliases = await self._persist_resolution_batch(
+            planned_entities=planned_entities,
+            planned_aliases=planned_aliases,
+            planned_resolutions=planned_resolutions,
+        )
+        created_entities += batch_entities
+        created_aliases += batch_aliases
+        planned_entities.clear()
+        planned_aliases.clear()
+        planned_resolutions.clear()
 
-        facts: list[_Fact] = []
-        fact_total = len(grouped)
-        self._report(progress, "Aggregating canonical facts", 0, fact_total, "fact")
-        for fact_number, (identity, support) in enumerate(grouped.items(), start=1):
-            subject_id, object_id, relation_name, qualifiers, negated, speculative = (
-                fact_values[identity]
-            )
-            facts.append(
+        relations_other = 0
+        duplicate_assertions = 0
+        created_assertions = 0
+        created_evidence = 0
+        seen_identities: set[str] = set()
+        relations, existing_assertions, existing_evidence = await self._load_fact_state()
+        assertion_total = len(raw_assertions)
+        pending_assertions = [
+            raw
+            for raw in raw_assertions
+            if raw.raw_assertion_id not in existing_evidence
+        ]
+        checkpointed_assertions = assertion_total - len(pending_assertions)
+        phase = "Canonicalizing assertions"
+        self._report(
+            progress,
+            phase,
+            checkpointed_assertions,
+            assertion_total,
+            "assertion",
+        )
+        for batch_start in range(0, len(pending_assertions), self.batch_size):
+            grouped: defaultdict[str, list[RawAssertion]] = defaultdict(list)
+            fact_values: dict[
+                str, tuple[str, str, str, dict[str, Any], bool, bool]
+            ] = {}
+            batch = pending_assertions[batch_start : batch_start + self.batch_size]
+            for raw in batch:
+                subject_id = resolution_map.get(raw.subject_mention_id)
+                object_id = resolution_map.get(raw.object_mention_id)
+                if subject_id and object_id:
+                    relation = self.relation_normalizer.normalize(raw.detailed_relation)
+                    if relation.canonical_relation.casefold() == "other" and self.semantic:
+                        relation = await self._semantic_relation_decision(raw)
+                    if relation.canonical_relation.casefold() == "other":
+                        relations_other += 1
+                    qualifiers = canonical_qualifiers(raw.qualifiers)
+                    identity = normalized_assertion_identity(
+                        subject_entity_id=subject_id,
+                        canonical_relation_id=relation.canonical_relation,
+                        object_entity_id=object_id,
+                        qualifiers=qualifiers,
+                        negated=raw.negated,
+                        speculative=raw.speculative,
+                    )
+                    if identity in seen_identities:
+                        duplicate_assertions += 1
+                    else:
+                        seen_identities.add(identity)
+                    grouped[identity].append(raw)
+                    fact_values[identity] = (
+                        subject_id,
+                        object_id,
+                        relation.canonical_relation,
+                        qualifiers,
+                        raw.negated,
+                        raw.speculative,
+                    )
+            facts = [
                 _Fact(
                     identity=identity,
-                    subject_entity_id=subject_id,
-                    object_entity_id=object_id,
-                    relation_name=relation_name,
-                    qualifiers=qualifiers,
-                    negated=negated,
-                    speculative=speculative,
+                    subject_entity_id=fact_values[identity][0],
+                    object_entity_id=fact_values[identity][1],
+                    relation_name=fact_values[identity][2],
+                    qualifiers=fact_values[identity][3],
+                    negated=fact_values[identity][4],
+                    speculative=fact_values[identity][5],
                     raw_assertions=tuple(support),
                     sources=_merge_sources(*(list(raw.sources) for raw in support)),
                 )
-            )
-            self._report(
-                progress,
-                "Aggregating canonical facts",
-                fact_number,
-                fact_total,
-                "fact",
-            )
-
-        created_entities, created_aliases, created_assertions, created_evidence = (
-            await self._persist(
-                planned_entities=planned_entities,
-                planned_aliases=planned_aliases,
-                planned_resolutions=planned_resolutions,
+                for identity, support in grouped.items()
+            ]
+            batch_assertions, batch_evidence = await self._persist_fact_batch(
                 facts=facts,
-                progress=progress,
+                relations=relations,
+                existing_assertions=existing_assertions,
+                existing_evidence=existing_evidence,
             )
-        )
+            created_assertions += batch_assertions
+            created_evidence += batch_evidence
+            completed = checkpointed_assertions + batch_start + len(batch)
+            self._report(progress, phase, completed, assertion_total, "assertion")
         return CanonicalizationResult(
             mentions_considered=len(mention_context),
             mentions_resolved=len(resolution_map),
@@ -368,9 +427,7 @@ class CanonicalizationPipeline:
             semantic_matches=semantic_matches,
             raw_assertions_considered=len(raw_assertions),
             canonical_assertions_created=created_assertions,
-            duplicate_assertions_aggregated=sum(
-                max(0, len(fact.raw_assertions) - 1) for fact in facts
-            ),
+            duplicate_assertions_aggregated=duplicate_assertions,
             evidence_links_created=created_evidence,
             relations_other=relations_other,
         )
@@ -419,15 +476,19 @@ class CanonicalizationPipeline:
                 ).all()
             )
             self._report(progress, phase, 2, 7, "query")
-            documents = list(
-                (
-                    await session.scalars(
-                        select(Document).join(
-                            document_ids,
-                            Document.document_id == document_ids.c.document_id,
+            documents = (
+                list(
+                    (
+                        await session.scalars(
+                            select(Document).join(
+                                document_ids,
+                                Document.document_id == document_ids.c.document_id,
+                            )
                         )
-                    )
-                ).all()
+                    ).all()
+                )
+                if self.semantic
+                else []
             )
             self._report(progress, phase, 3, 7, "query")
             resolutions = list(
@@ -470,25 +531,67 @@ class CanonicalizationPipeline:
         if progress is not None:
             progress(phase, completed, total, unit)
 
-    @staticmethod
-    def _candidates(
-        entities: dict[str, _EntityRecord],
-        aliases: defaultdict[str, set[str]],
-        external_ids: defaultdict[str, list[str]],
+    async def _persist_resolution_batch(
+        self,
         *,
-        entity_type: str,
-    ) -> list[EntityCandidate]:
-        return [
-            EntityCandidate(
-                entity_id=entity.entity_id,
-                canonical_name=entity.canonical_name,
-                entity_type=entity.entity_type,
-                aliases=tuple(sorted(aliases[entity.entity_id])),
-                external_ids=tuple(sorted(external_ids[entity.entity_id])),
-            )
-            for entity in entities.values()
-            if entity.entity_type == entity_type
-        ]
+        planned_entities: dict[str, _EntityRecord],
+        planned_aliases: set[tuple[str, str, str, float]],
+        planned_resolutions: list[_ResolutionRecord],
+    ) -> tuple[int, int]:
+        if not planned_entities and not planned_aliases and not planned_resolutions:
+            return 0, 0
+        async with self.repository._write_session() as session:
+            entities_created = 0
+            if planned_entities:
+                await session.execute(
+                    insert(Entity).on_conflict_do_nothing(index_elements=["entity_id"]),
+                    [
+                        {
+                            "entity_id": record.entity_id,
+                            "canonical_name": record.canonical_name,
+                            "entity_type": record.entity_type,
+                            "sources": record.sources,
+                        }
+                        for record in planned_entities.values()
+                    ],
+                )
+                entities_created = len(planned_entities)
+
+            aliases_created = 0
+            if planned_aliases:
+                await session.execute(
+                    insert(EntityAlias).on_conflict_do_nothing(
+                        index_elements=["entity_id", "alias"]
+                    ),
+                    [
+                        {
+                            "entity_id": entity_id,
+                            "alias": alias,
+                            "alias_source": method,
+                            "confidence": confidence,
+                        }
+                        for entity_id, alias, method, confidence in sorted(planned_aliases)
+                    ],
+                )
+                aliases_created = len(planned_aliases)
+
+            if planned_resolutions:
+                await session.execute(
+                    insert(EntityResolution).on_conflict_do_nothing(
+                        index_elements=["mention_id"]
+                    ),
+                    [
+                        {
+                            "mention_id": record.mention_id,
+                            "entity_id": record.entity_id,
+                            "resolution_method": record.method,
+                            "confidence": record.confidence,
+                            "candidate_snapshot": record.candidates,
+                        }
+                        for record in planned_resolutions
+                    ],
+                )
+        return entities_created, aliases_created
 
     async def _semantic_entity_decision(
         self,
@@ -572,121 +675,107 @@ class CanonicalizationPipeline:
             return RelationMapping(selected, output.confidence)
         return self.relation_normalizer.normalize(raw.detailed_relation)
 
-    async def _persist(
+    async def _load_fact_state(
+        self,
+    ) -> tuple[
+        dict[str, uuid.UUID],
+        dict[str, _AssertionRecord],
+        set[uuid.UUID],
+    ]:
+        async with self.repository.sessions() as session:
+            relation_rows = list((await session.scalars(select(RelationType))).all())
+            assertion_rows = (
+                await session.execute(
+                    select(
+                        Assertion.assertion_id,
+                        Assertion.normalized_identity,
+                        Assertion.sources,
+                    )
+                )
+            ).all()
+            evidence_ids = set(
+                (
+                    await session.scalars(
+                        select(AssertionEvidence.raw_assertion_id)
+                    )
+                ).all()
+            )
+        relations = {
+            item.canonical_name.casefold(): item.relation_id for item in relation_rows
+        }
+        assertions = {
+            identity: _AssertionRecord(assertion_id, list(sources))
+            for assertion_id, identity, sources in assertion_rows
+        }
+        return relations, assertions, evidence_ids
+
+    async def _persist_fact_batch(
         self,
         *,
-        planned_entities: dict[str, _EntityRecord],
-        planned_aliases: set[tuple[str, str, str, float]],
-        planned_resolutions: list[_ResolutionRecord],
         facts: list[_Fact],
-        progress: CanonicalizationProgress | None = None,
-    ) -> tuple[int, int, int, int]:
-        entities_created = aliases_created = assertions_created = evidence_created = 0
-        phase = "Writing canonical graph"
-        write_total = (
-            len(planned_entities)
-            + len(planned_aliases)
-            + len(planned_resolutions)
-            + len(facts)
-            + sum(len(fact.raw_assertions) for fact in facts)
-        )
-        written = 0
-        self._report(progress, phase, written, write_total, "record")
+        relations: dict[str, uuid.UUID],
+        existing_assertions: dict[str, _AssertionRecord],
+        existing_evidence: set[uuid.UUID],
+    ) -> tuple[int, int]:
+        if not facts:
+            return 0, 0
+        new_assertions: list[dict[str, Any]] = []
+        source_updates: list[tuple[uuid.UUID, list[dict[str, Any]]]] = []
+        evidence_rows: list[dict[str, Any]] = []
+        for fact in facts:
+            assertion = existing_assertions.get(fact.identity)
+            if assertion is None:
+                assertion = _AssertionRecord(uuid.uuid4(), fact.sources)
+                existing_assertions[fact.identity] = assertion
+                new_assertions.append(
+                    {
+                        "assertion_id": assertion.assertion_id,
+                        "raw_assertion_id": fact.raw_assertions[0].raw_assertion_id,
+                        "subject_entity_id": fact.subject_entity_id,
+                        "object_entity_id": fact.object_entity_id,
+                        "canonical_relation_id": relations[fact.relation_name.casefold()],
+                        "qualifiers": fact.qualifiers,
+                        "negated": fact.negated,
+                        "speculative": fact.speculative,
+                        "normalized_identity": fact.identity,
+                        "sources": fact.sources,
+                    }
+                )
+            else:
+                merged_sources = _merge_sources(assertion.sources, fact.sources)
+                if merged_sources != assertion.sources:
+                    assertion.sources = merged_sources
+                    source_updates.append((assertion.assertion_id, merged_sources))
+
+            for raw in fact.raw_assertions:
+                if raw.raw_assertion_id in existing_evidence:
+                    continue
+                existing_evidence.add(raw.raw_assertion_id)
+                evidence_rows.append(
+                    {
+                        "assertion_id": assertion.assertion_id,
+                        "raw_assertion_id": raw.raw_assertion_id,
+                        "document_id": raw.document_id,
+                        "evidence_text": raw.evidence_text,
+                        "llm_confidence": raw.llm_confidence,
+                        "sources": raw.sources,
+                    }
+                )
+
         async with self.repository._write_session() as session:
-            for record in planned_entities.values():
-                if await session.get(Entity, record.entity_id) is None:
-                    session.add(
-                        Entity(
-                            entity_id=record.entity_id,
-                            canonical_name=record.canonical_name,
-                            entity_type=record.entity_type,
-                            sources=record.sources,
-                        )
-                    )
-                    entities_created += 1
-                written += 1
-                self._report(progress, phase, written, write_total, "record")
-            await session.flush()
-
-            for entity_id, alias, method, confidence in sorted(planned_aliases):
-                statement = (
-                    insert(EntityAlias)
-                    .values(
-                        entity_id=entity_id,
-                        alias=alias,
-                        alias_source=method,
-                        confidence=confidence,
-                    )
-                    .on_conflict_do_nothing(index_elements=["entity_id", "alias"])
+            if new_assertions:
+                await session.execute(insert(Assertion), new_assertions)
+            for assertion_id, sources in source_updates:
+                await session.execute(
+                    update(Assertion)
+                    .where(Assertion.assertion_id == assertion_id)
+                    .values(sources=sources)
                 )
-                result = await session.execute(statement)
-                aliases_created += result.rowcount or 0
-                written += 1
-                self._report(progress, phase, written, write_total, "record")
-
-            for record in planned_resolutions:
-                statement = (
-                    insert(EntityResolution)
-                    .values(
-                        mention_id=record.mention_id,
-                        entity_id=record.entity_id,
-                        resolution_method=record.method,
-                        confidence=record.confidence,
-                        candidate_snapshot=record.candidates,
-                    )
-                    .on_conflict_do_nothing(index_elements=["mention_id"])
+            if evidence_rows:
+                await session.execute(
+                    insert(AssertionEvidence).on_conflict_do_nothing(
+                        index_elements=["raw_assertion_id"]
+                    ),
+                    evidence_rows,
                 )
-                await session.execute(statement)
-                written += 1
-                self._report(progress, phase, written, write_total, "record")
-
-            relation_rows = list((await session.scalars(select(RelationType))).all())
-            relations = {item.canonical_name.casefold(): item for item in relation_rows}
-            existing_assertions = {
-                item.normalized_identity: item
-                for item in (await session.scalars(select(Assertion))).all()
-            }
-            for fact in facts:
-                assertion = existing_assertions.get(fact.identity)
-                if assertion is None:
-                    relation = relations[fact.relation_name.casefold()]
-                    assertion = Assertion(
-                        raw_assertion_id=fact.raw_assertions[0].raw_assertion_id,
-                        subject_entity_id=fact.subject_entity_id,
-                        object_entity_id=fact.object_entity_id,
-                        canonical_relation_id=relation.relation_id,
-                        qualifiers=fact.qualifiers,
-                        negated=fact.negated,
-                        speculative=fact.speculative,
-                        normalized_identity=fact.identity,
-                        sources=fact.sources,
-                    )
-                    session.add(assertion)
-                    await session.flush()
-                    existing_assertions[fact.identity] = assertion
-                    assertions_created += 1
-                else:
-                    assertion.sources = _merge_sources(
-                        list(assertion.sources), fact.sources
-                    )
-                written += 1
-                self._report(progress, phase, written, write_total, "record")
-
-                for raw in fact.raw_assertions:
-                    statement = (
-                        insert(AssertionEvidence)
-                        .values(
-                            assertion_id=assertion.assertion_id,
-                            raw_assertion_id=raw.raw_assertion_id,
-                            document_id=raw.document_id,
-                            evidence_text=raw.evidence_text,
-                            llm_confidence=raw.llm_confidence,
-                            sources=raw.sources,
-                        )
-                        .on_conflict_do_nothing(index_elements=["raw_assertion_id"])
-                    )
-                    result = await session.execute(statement)
-                    evidence_created += result.rowcount or 0
-                    written += 1
-                    self._report(progress, phase, written, write_total, "record")
-        return entities_created, aliases_created, assertions_created, evidence_created
+        return len(new_assertions), len(evidence_rows)

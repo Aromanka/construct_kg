@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -213,3 +214,102 @@ class ConservativeEntityResolver:
         self, mention: str, entity_type: str, candidates: list[EntityCandidate]
     ) -> str | None:
         return self.resolve_decision(mention, entity_type, candidates).entity_id
+
+
+class IndexedEntityResolver:
+    """Resolve deterministic aliases without scanning every entity for every mention."""
+
+    def __init__(self, candidates: list[EntityCandidate] | None = None) -> None:
+        self._canonical_names: dict[str, str] = {}
+        self._entity_types: dict[str, str] = {}
+        self._aliases: defaultdict[str, set[str]] = defaultdict(set)
+        self._external_ids: defaultdict[str, set[str]] = defaultdict(set)
+        self._entities_by_type: defaultdict[str, set[str]] = defaultdict(set)
+        self._exact: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+        self._abbreviation_keys: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+        self._abbreviation_form_keys: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+        self._compact_forms: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+        self._compact_abbreviations: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+        for candidate in candidates or []:
+            self.add_candidate(candidate)
+
+    def add_candidate(self, candidate: EntityCandidate) -> None:
+        entity_id = candidate.entity_id
+        self._canonical_names.setdefault(entity_id, candidate.canonical_name)
+        self._entity_types.setdefault(entity_id, candidate.entity_type)
+        self._entities_by_type[candidate.entity_type].add(entity_id)
+        self._external_ids[entity_id].update(candidate.external_ids)
+        self._index_form(entity_id, candidate.entity_type, candidate.canonical_name)
+        for alias in candidate.aliases:
+            self.add_alias(entity_id, candidate.entity_type, alias)
+
+    def add_alias(self, entity_id: str, entity_type: str, alias: str) -> None:
+        if alias in self._aliases[entity_id]:
+            return
+        self._aliases[entity_id].add(alias)
+        self._index_form(entity_id, entity_type, alias)
+
+    def candidates(self, entity_type: str) -> list[EntityCandidate]:
+        return [
+            EntityCandidate(
+                entity_id=entity_id,
+                canonical_name=self._canonical_names[entity_id],
+                entity_type=entity_type,
+                aliases=tuple(sorted(self._aliases[entity_id])),
+                external_ids=tuple(sorted(self._external_ids[entity_id])),
+            )
+            for entity_id in sorted(self._entities_by_type[entity_type])
+        ]
+
+    def resolve_decision(self, mention: str, entity_type: str) -> ResolutionDecision:
+        key = normalized_alias(mention)
+        exact_matches = self._exact[(entity_type, key)] if key else set()
+        if len(exact_matches) == 1:
+            return ResolutionDecision(next(iter(exact_matches)), "exact_alias", 1.0)
+        if len(exact_matches) > 1:
+            return ResolutionDecision(None, "ambiguous", 0.0)
+
+        compact = _compact(mention)
+        short_key = abbreviation_key(mention)
+        if _looks_like_abbreviation(mention):
+            abbreviation_matches = set(self._abbreviation_keys[(entity_type, compact)])
+            abbreviation_matches.update(self._compact_forms[(entity_type, short_key)])
+        else:
+            abbreviation_matches = set(
+                self._abbreviation_form_keys[(entity_type, compact)]
+            )
+            abbreviation_matches.update(
+                self._compact_abbreviations[(entity_type, short_key)]
+            )
+        if len(abbreviation_matches) == 1:
+            return ResolutionDecision(
+                next(iter(abbreviation_matches)), "abbreviation", 0.98
+            )
+        if len(abbreviation_matches) > 1:
+            return ResolutionDecision(None, "ambiguous", 0.0)
+
+        synonym_matches: set[str] = set()
+        for synonym_type, synonyms in DEFAULT_EQUIVALENT_ALIASES:
+            if synonym_type != entity_type or key not in synonyms:
+                continue
+            for synonym in synonyms:
+                synonym_matches.update(self._exact[(entity_type, synonym)])
+        if len(synonym_matches) == 1:
+            return ResolutionDecision(next(iter(synonym_matches)), "known_synonym", 0.99)
+        return ResolutionDecision(None, "new", 1.0)
+
+    def _index_form(self, entity_id: str, entity_type: str, form: str) -> None:
+        normalized = normalized_alias(form)
+        compact = _compact(form)
+        short_key = abbreviation_key(form)
+        if normalized:
+            self._exact[(entity_type, normalized)].add(entity_id)
+        if short_key:
+            self._abbreviation_keys[(entity_type, short_key)].add(entity_id)
+        if compact:
+            self._compact_forms[(entity_type, compact)].add(entity_id)
+        if _looks_like_abbreviation(form):
+            if short_key:
+                self._abbreviation_form_keys[(entity_type, short_key)].add(entity_id)
+            if compact:
+                self._compact_abbreviations[(entity_type, compact)].add(entity_id)
