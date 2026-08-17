@@ -202,6 +202,10 @@ Run deterministic, high-precision canonicalization after Bronze extraction:
 python -m medical_kg canonicalize --config config.yaml
 ```
 
+The command shows human-readable progress bars for database preparation, snapshot loading, entity
+resolution, relation normalization, fact aggregation, and persistence. For line-oriented server
+logs, disable the bars with `--progress-style log`.
+
 This mode merges only an unambiguous exact alias, type-compatible abbreviation, or curated
 high-precision synonym. Otherwise it creates a new canonical entity, because a false medical merge
 is more harmful than a false split. It never modifies `entity_mentions` or `raw_assertions`.

@@ -36,6 +36,12 @@ def test_canonicalize_parser_accepts_silver_options() -> None:
     assert args.command == "canonicalize"
     assert args.semantic is True
     assert args.document_id == "doc-1"
+    assert args.progress_style == "bar"
+
+    log_args = build_parser().parse_args(
+        ["canonicalize", "--progress-style", "log"]
+    )
+    assert log_args.progress_style == "log"
 
 
 def test_stats_parser_accepts_config() -> None:

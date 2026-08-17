@@ -239,7 +239,38 @@ async def _run_command(args: argparse.Namespace) -> Any:
                 confidence_threshold=settings.canonicalization.confidence_threshold,
                 candidate_top_k=settings.canonicalization.candidate_top_k,
             )
-            return await pipeline.run(document_id=args.document_id)
+            canonicalization_bar = None
+            canonicalization_phase = None
+
+            def update_canonicalization(
+                phase: str, completed: int, total: int, unit: str
+            ) -> None:
+                nonlocal canonicalization_bar, canonicalization_phase
+                if canonicalization_phase != phase:
+                    if canonicalization_bar is not None:
+                        canonicalization_bar.close()
+                    canonicalization_bar = tqdm(
+                        total=total,
+                        desc=phase,
+                        unit=unit,
+                        dynamic_ncols=True,
+                        bar_format=_PROGRESS_FORMAT,
+                    )
+                    canonicalization_phase = phase
+                delta = completed - canonicalization_bar.n
+                if delta > 0:
+                    canonicalization_bar.update(delta)
+
+            try:
+                return await pipeline.run(
+                    document_id=args.document_id,
+                    progress=(
+                        update_canonicalization if progress_style == "bar" else None
+                    ),
+                )
+            finally:
+                if canonicalization_bar is not None:
+                    canonicalization_bar.close()
 
         raise ValueError(f"Unknown command: {args.command}")
     finally:
@@ -320,6 +351,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the configured LLM for ambiguous entity/relation candidates",
     )
     canonicalize.add_argument("--document-id")
+    canonicalize.add_argument(
+        "--progress-style",
+        choices=("bar", "log"),
+        default="bar",
+        help="Progress output style: tqdm bars (default) or final/log output only",
+    )
     _add_config(canonicalize)
     return parser
 

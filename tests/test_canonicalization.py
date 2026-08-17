@@ -110,7 +110,8 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
             prompts=PromptRegistry(Path(__file__).parents[1] / "prompts"),
         )
 
-        first = await pipeline.run()
+        progress_events: list[tuple[str, int, int, str]] = []
+        first = await pipeline.run(progress=lambda *event: progress_events.append(event))
         second = await pipeline.run()
 
         assert first.entities_created == 2
@@ -120,6 +121,19 @@ async def test_canonicalization_resolves_aliases_and_aggregates_evidence(
         assert second.entities_created == 0
         assert second.canonical_assertions_created == 0
         assert second.evidence_links_created == 0
+        completed_phases = {
+            phase
+            for phase, completed, total, _unit in progress_events
+            if completed == total
+        }
+        assert completed_phases == {
+            "Preparing database",
+            "Loading canonicalization data",
+            "Resolving entity mentions",
+            "Normalizing relations",
+            "Aggregating canonical facts",
+            "Writing canonical graph",
+        }
 
         async with repository.sessions() as session:
             counts = {

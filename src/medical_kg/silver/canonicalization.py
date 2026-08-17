@@ -4,6 +4,7 @@ import hashlib
 import json
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,8 @@ from medical_kg.silver.entity_resolution import (
     preferred_canonical_name,
 )
 from medical_kg.silver.relation_normalization import ExactRelationNormalizer
+
+CanonicalizationProgress = Callable[[str, int, int, str], None]
 
 
 @dataclass(frozen=True)
@@ -124,10 +127,18 @@ class CanonicalizationPipeline:
         self.resolver = ConservativeEntityResolver()
         self.relation_normalizer = ExactRelationNormalizer(vocabulary)
 
-    async def run(self, *, document_id: str | None = None) -> CanonicalizationResult:
+    async def run(
+        self,
+        *,
+        document_id: str | None = None,
+        progress: CanonicalizationProgress | None = None,
+    ) -> CanonicalizationResult:
+        self._report(progress, "Preparing database", 0, 2, "step")
         await self.repository.create_schema()
+        self._report(progress, "Preparing database", 1, 2, "step")
         await self.repository.seed_relations(self.vocabulary)
-        snapshot = await self._load_snapshot(document_id=document_id)
+        self._report(progress, "Preparing database", 2, 2, "step")
+        snapshot = await self._load_snapshot(document_id=document_id, progress=progress)
         raw_assertions: list[RawAssertion] = snapshot["raw_assertions"]
         mentions: dict[uuid.UUID, EntityMention] = snapshot["mentions"]
         documents: dict[str, Document] = snapshot["documents"]
@@ -160,8 +171,18 @@ class CanonicalizationPipeline:
         deterministic_matches = 0
         semantic_matches = 0
 
-        for mention_id in sorted(mention_context, key=str):
+        ordered_mention_ids = sorted(mention_context, key=str)
+        mention_total = len(ordered_mention_ids)
+        self._report(progress, "Resolving entity mentions", 0, mention_total, "mention")
+        for mention_number, mention_id in enumerate(ordered_mention_ids, start=1):
             if mention_id in resolution_map:
+                self._report(
+                    progress,
+                    "Resolving entity mentions",
+                    mention_number,
+                    mention_total,
+                    "mention",
+                )
                 continue
             mention = mentions[mention_id]
             candidates = self._candidates(
@@ -245,14 +266,30 @@ class CanonicalizationPipeline:
                     ],
                 )
             )
+            self._report(
+                progress,
+                "Resolving entity mentions",
+                mention_number,
+                mention_total,
+                "mention",
+            )
 
         grouped: defaultdict[str, list[RawAssertion]] = defaultdict(list)
         fact_values: dict[str, tuple[str, str, str, dict[str, Any], bool, bool]] = {}
         relations_other = 0
-        for raw in raw_assertions:
+        assertion_total = len(raw_assertions)
+        self._report(progress, "Normalizing relations", 0, assertion_total, "assertion")
+        for assertion_number, raw in enumerate(raw_assertions, start=1):
             subject_id = resolution_map.get(raw.subject_mention_id)
             object_id = resolution_map.get(raw.object_mention_id)
             if not subject_id or not object_id:
+                self._report(
+                    progress,
+                    "Normalizing relations",
+                    assertion_number,
+                    assertion_total,
+                    "assertion",
+                )
                 continue
             relation = self.relation_normalizer.normalize(raw.detailed_relation)
             if relation.canonical_relation.casefold() == "other" and self.semantic:
@@ -277,9 +314,18 @@ class CanonicalizationPipeline:
                 raw.negated,
                 raw.speculative,
             )
+            self._report(
+                progress,
+                "Normalizing relations",
+                assertion_number,
+                assertion_total,
+                "assertion",
+            )
 
         facts: list[_Fact] = []
-        for identity, support in grouped.items():
+        fact_total = len(grouped)
+        self._report(progress, "Aggregating canonical facts", 0, fact_total, "fact")
+        for fact_number, (identity, support) in enumerate(grouped.items(), start=1):
             subject_id, object_id, relation_name, qualifiers, negated, speculative = (
                 fact_values[identity]
             )
@@ -296,6 +342,13 @@ class CanonicalizationPipeline:
                     sources=_merge_sources(*(list(raw.sources) for raw in support)),
                 )
             )
+            self._report(
+                progress,
+                "Aggregating canonical facts",
+                fact_number,
+                fact_total,
+                "fact",
+            )
 
         created_entities, created_aliases, created_assertions, created_evidence = (
             await self._persist(
@@ -303,6 +356,7 @@ class CanonicalizationPipeline:
                 planned_aliases=planned_aliases,
                 planned_resolutions=planned_resolutions,
                 facts=facts,
+                progress=progress,
             )
         )
         return CanonicalizationResult(
@@ -321,7 +375,12 @@ class CanonicalizationPipeline:
             relations_other=relations_other,
         )
 
-    async def _load_snapshot(self, *, document_id: str | None) -> dict[str, Any]:
+    async def _load_snapshot(
+        self,
+        *,
+        document_id: str | None,
+        progress: CanonicalizationProgress | None = None,
+    ) -> dict[str, Any]:
         raw_statement = select(RawAssertion).order_by(RawAssertion.created_at)
         subject_mentions = select(
             RawAssertion.subject_mention_id.label("mention_id")
@@ -344,8 +403,11 @@ class CanonicalizationPipeline:
         # parameters exceeds SQLITE_MAX_VARIABLE_NUMBER on realistically sized corpora.
         mention_ids = subject_mentions.union(object_mentions).subquery()
         document_ids = document_ids.subquery()
+        phase = "Loading canonicalization data"
+        self._report(progress, phase, 0, 7, "query")
         async with self.repository.sessions() as session:
             raw_assertions = list((await session.scalars(raw_statement)).all())
+            self._report(progress, phase, 1, 7, "query")
             mentions = list(
                 (
                     await session.scalars(
@@ -356,6 +418,7 @@ class CanonicalizationPipeline:
                     )
                 ).all()
             )
+            self._report(progress, phase, 2, 7, "query")
             documents = list(
                 (
                     await session.scalars(
@@ -366,6 +429,7 @@ class CanonicalizationPipeline:
                     )
                 ).all()
             )
+            self._report(progress, phase, 3, 7, "query")
             resolutions = list(
                 (
                     await session.scalars(
@@ -376,6 +440,13 @@ class CanonicalizationPipeline:
                     )
                 ).all()
             )
+            self._report(progress, phase, 4, 7, "query")
+            entities = list((await session.scalars(select(Entity))).all())
+            self._report(progress, phase, 5, 7, "query")
+            aliases = list((await session.scalars(select(EntityAlias))).all())
+            self._report(progress, phase, 6, 7, "query")
+            external_ids = list((await session.scalars(select(EntityExternalId))).all())
+            self._report(progress, phase, 7, 7, "query")
             return {
                 "raw_assertions": raw_assertions,
                 "mentions": {item.mention_id: item for item in mentions},
@@ -383,12 +454,21 @@ class CanonicalizationPipeline:
                 "resolutions": {
                     item.mention_id: item.entity_id for item in resolutions
                 },
-                "entities": list((await session.scalars(select(Entity))).all()),
-                "aliases": list((await session.scalars(select(EntityAlias))).all()),
-                "external_ids": list(
-                    (await session.scalars(select(EntityExternalId))).all()
-                ),
+                "entities": entities,
+                "aliases": aliases,
+                "external_ids": external_ids,
             }
+
+    @staticmethod
+    def _report(
+        progress: CanonicalizationProgress | None,
+        phase: str,
+        completed: int,
+        total: int,
+        unit: str,
+    ) -> None:
+        if progress is not None:
+            progress(phase, completed, total, unit)
 
     @staticmethod
     def _candidates(
@@ -499,8 +579,19 @@ class CanonicalizationPipeline:
         planned_aliases: set[tuple[str, str, str, float]],
         planned_resolutions: list[_ResolutionRecord],
         facts: list[_Fact],
+        progress: CanonicalizationProgress | None = None,
     ) -> tuple[int, int, int, int]:
         entities_created = aliases_created = assertions_created = evidence_created = 0
+        phase = "Writing canonical graph"
+        write_total = (
+            len(planned_entities)
+            + len(planned_aliases)
+            + len(planned_resolutions)
+            + len(facts)
+            + sum(len(fact.raw_assertions) for fact in facts)
+        )
+        written = 0
+        self._report(progress, phase, written, write_total, "record")
         async with self.repository._write_session() as session:
             for record in planned_entities.values():
                 if await session.get(Entity, record.entity_id) is None:
@@ -513,6 +604,8 @@ class CanonicalizationPipeline:
                         )
                     )
                     entities_created += 1
+                written += 1
+                self._report(progress, phase, written, write_total, "record")
             await session.flush()
 
             for entity_id, alias, method, confidence in sorted(planned_aliases):
@@ -528,6 +621,8 @@ class CanonicalizationPipeline:
                 )
                 result = await session.execute(statement)
                 aliases_created += result.rowcount or 0
+                written += 1
+                self._report(progress, phase, written, write_total, "record")
 
             for record in planned_resolutions:
                 statement = (
@@ -542,6 +637,8 @@ class CanonicalizationPipeline:
                     .on_conflict_do_nothing(index_elements=["mention_id"])
                 )
                 await session.execute(statement)
+                written += 1
+                self._report(progress, phase, written, write_total, "record")
 
             relation_rows = list((await session.scalars(select(RelationType))).all())
             relations = {item.canonical_name.casefold(): item for item in relation_rows}
@@ -572,6 +669,8 @@ class CanonicalizationPipeline:
                     assertion.sources = _merge_sources(
                         list(assertion.sources), fact.sources
                     )
+                written += 1
+                self._report(progress, phase, written, write_total, "record")
 
                 for raw in fact.raw_assertions:
                     statement = (
@@ -588,4 +687,6 @@ class CanonicalizationPipeline:
                     )
                     result = await session.execute(statement)
                     evidence_created += result.rowcount or 0
+                    written += 1
+                    self._report(progress, phase, written, write_total, "record")
         return entities_created, aliases_created, assertions_created, evidence_created
