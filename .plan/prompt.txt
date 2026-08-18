@@ -48,4 +48,7 @@ For openalex construction, I visualizded the gold part by command: `python src/u
 I want to visualize the constructed pnet in the similar command, by creating a vew script. You can refer to @src\utils\sqlite_gold_to_neo4j.py .
 Howevery, you may just use the produced pnet files instead of using the sqlite3 database.
 
+---
+The current web visualization of the kg (gold kg) through the script @src/utils/sqlite_gold_to_neo4j.py only display the detailed information of the node. I want to add an interface to display the edge detailed information, what kind of visualization technique might be useful and easy to realize? Search and raise a few proposals.
+
 
