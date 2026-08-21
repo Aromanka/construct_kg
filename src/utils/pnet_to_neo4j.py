@@ -467,7 +467,7 @@ function layout(){
   const layers={};
   nodes.forEach(n=>{if(!layers[n.layer])layers[n.layer]=[];layers[n.layer].push(n)});
   const layerOrder=Object.keys(layers).sort();
-  const spacing=180,vSpacing=9000,margin=50;
+  const spacing=180,vSpacing=5000,margin=50;
   layerOrder.forEach((layer,i)=>{
     const layerNodes=layers[layer];
     const w=(layerNodes.length-1)*spacing;

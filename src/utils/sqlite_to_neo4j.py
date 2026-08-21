@@ -437,6 +437,10 @@ def query_graph(driver: Any, database: str | None, mode: str, limit: int) -> dic
         relationship = _record_value(record, "r")
         properties = dict(relationship)
         relationship_type = str(_record_value(record, "relationship_type"))
+
+        # Store assertion_id for later evidence lookup
+        assertion_id = properties.get("assertion_id")
+
         edges.append(
             {
                 "id": f"edge-{index}-{source_key}-{target_key}",
@@ -445,6 +449,7 @@ def query_graph(driver: Any, database: str | None, mode: str, limit: int) -> dic
                 "label": str(properties.get("relation") or relationship_type),
                 "type": relationship_type,
                 "properties": _json_safe(properties),
+                "assertion_id": str(assertion_id) if assertion_id else None,
             }
         )
 
@@ -496,9 +501,57 @@ def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=_json_default))
 
 
+def query_edge_evidence(sqlite_path: Path | None, assertion_id: str) -> dict[str, Any]:
+    """Query SQLite for evidence details of a Gold assertion."""
+    if not sqlite_path or not sqlite_path.is_file():
+        return {"error": "SQLite database not available", "evidence": []}
+
+    uri = sqlite_path.resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        # Join assertion_evidence → documents → raw_assertions
+        query = """
+            SELECT
+                ae.evidence_text,
+                ae.llm_confidence,
+                d.document_id,
+                d.title,
+                d.file_path,
+                d.doi,
+                d.pmid,
+                ra.detailed_relation
+            FROM assertion_evidence ae
+            JOIN documents d ON ae.document_id = d.document_id
+            LEFT JOIN raw_assertions ra ON ae.raw_assertion_id = ra.raw_assertion_id
+            WHERE ae.assertion_id = ?
+            ORDER BY ae.llm_confidence DESC
+        """
+        rows = conn.execute(query, (assertion_id,)).fetchall()
+
+        evidence = []
+        for row in rows:
+            evidence.append({
+                "document_title": row["title"],
+                "document_id": row["document_id"],
+                "file_path": row["file_path"],
+                "doi": row["doi"],
+                "pmid": row["pmid"],
+                "evidence_text": row["evidence_text"],
+                "detailed_relation": row["detailed_relation"],
+                "confidence": row["llm_confidence"],
+            })
+
+        return {"evidence": evidence}
+    finally:
+        conn.close()
+
+
 class GraphRequestHandler(BaseHTTPRequestHandler):
     driver: Any = None
     database: str | None = None
+    sqlite_path: Path | None = None
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
         parsed = urlparse(self.path)
@@ -515,6 +568,18 @@ class GraphRequestHandler(BaseHTTPRequestHandler):
                 limit = max(1, min(requested, MAX_WEB_ITEMS))
                 payload = query_graph(self.driver, self.database, mode, limit)
                 self._json(HTTPStatus.OK, payload)
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+        if parsed.path == "/api/edge-evidence":
+            parameters = parse_qs(parsed.query)
+            assertion_id = parameters.get("assertion_id", [None])[0]
+            if not assertion_id:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "assertion_id required"})
+                return
+            try:
+                evidence = query_edge_evidence(self.sqlite_path, assertion_id)
+                self._json(HTTPStatus.OK, evidence)
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
@@ -536,11 +601,11 @@ class GraphRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def serve(driver: Any, database: str | None, host: str, port: int, open_browser: bool) -> None:
+def serve(driver: Any, database: str | None, host: str, port: int, open_browser: bool, sqlite_path: Path | None = None) -> None:
     handler = type(
         "ConfiguredGraphHandler",
         (GraphRequestHandler,),
-        {"driver": driver, "database": database},
+        {"driver": driver, "database": database, "sqlite_path": sqlite_path},
     )
     server = ThreadingHTTPServer((host, port), handler)
     url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
@@ -611,7 +676,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.action in {"all", "import"}:
             import_database(args, driver)
         if args.action in {"all", "serve"}:
-            serve(driver, args.database, args.host, args.port, args.open_browser)
+            serve(driver, args.database, args.host, args.port, args.open_browser, args.sqlite)
     finally:
         driver.close()
     return 0
@@ -649,7 +714,7 @@ function hash(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))|0;return Math
 function color(kind){return palette[hash(kind)%palette.length]}
 function resize(){const r=canvas.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);draw()}
 function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function display(item,title){const props=item.properties||{};const isEdge=!!item.type;let html=`<h2>${escapeHtml(title)}</h2><div>${(item.labels||[item.type,item.kind]).filter(Boolean).map(x=>`<span class="tag">${escapeHtml(x)}</span>`).join('')}</div>`;if(isEdge&&props.negated)html+=`<div class="edge-highlight"><span class="flag">⚠ 否定关系</span></div>`;if(isEdge&&props.speculative)html+=`<div class="edge-highlight"><span class="flag">⚠ 推测性关系</span></div>`;if(isEdge&&props.support_count)html+=`<div class="edge-highlight">支持证据数：<strong>${props.support_count}</strong></div>`;let rows=Object.entries(props).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(typeof v==='object'?JSON.stringify(v,null,2):v)}</td></tr>`).join('');detail.innerHTML=html+`<table>${rows}</table>`}
+function display(item,title){const props=item.properties||{};const isEdge=!!item.type;let html=`<h2>${escapeHtml(title)}</h2><div>${(item.labels||[item.type,item.kind]).filter(Boolean).map(x=>`<span class="tag">${escapeHtml(x)}</span>`).join('')}</div>`;if(isEdge&&props.negated)html+=`<div class="edge-highlight"><span class="flag">⚠ 否定关系</span></div>`;if(isEdge&&props.speculative)html+=`<div class="edge-highlight"><span class="flag">⚠ 推测性关系</span></div>`;if(isEdge&&props.support_count)html+=`<div class="edge-highlight">支持证据数：<strong>${props.support_count}</strong></div>`;let rows=Object.entries(props).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(typeof v==='object'?JSON.stringify(v,null,2):v)}</td></tr>`).join('');detail.innerHTML=html+`<table>${rows}</table>`;if(isEdge&&item.assertion_id){detail.innerHTML+='<div id="evidence-loading" style="margin-top:16px;color:var(--muted)">加载证据详情...</div>';fetch(`/api/edge-evidence?assertion_id=${encodeURIComponent(item.assertion_id)}`).then(r=>r.json()).then(d=>{const container=document.querySelector('#evidence-loading');if(!container)return;if(d.error){container.innerHTML=`<p style="color:#f97316">加载证据失败: ${escapeHtml(d.error)}</p>`;return}if(!d.evidence||!d.evidence.length){container.innerHTML='<p style="color:var(--muted)">无证据详情。</p>';return}let evHtml='<h3 style="margin:16px 0 8px;font-size:15px">证据详情</h3>';d.evidence.forEach((ev,i)=>{evHtml+=`<div style="margin:12px 0;padding:10px;background:rgba(255,255,255,0.03);border-left:2px solid var(--accent);border-radius:4px"><p><strong>来源 ${i+1}:</strong> ${escapeHtml(ev.document_title||ev.document_id)}</p>`;if(ev.file_path)evHtml+=`<p style="font-size:0.9em;color:var(--muted)">文件: ${escapeHtml(ev.file_path)}</p>`;if(ev.doi)evHtml+=`<p style="font-size:0.9em">DOI: ${escapeHtml(ev.doi)}</p>`;if(ev.pmid)evHtml+=`<p style="font-size:0.9em">PMID: ${escapeHtml(ev.pmid)}</p>`;if(ev.detailed_relation)evHtml+=`<p><strong>原始关系短语:</strong> <em>"${escapeHtml(ev.detailed_relation)}"</em></p>`;if(ev.evidence_text)evHtml+=`<p><strong>证据文本:</strong> "${escapeHtml(ev.evidence_text)}"</p>`;if(ev.confidence!=null)evHtml+=`<p style="font-size:0.9em">置信度: ${ev.confidence}</p>`;evHtml+='</div>'});container.innerHTML=evHtml}).catch(err=>{const container=document.querySelector('#evidence-loading');if(container)container.innerHTML=`<p style="color:#f97316">加载失败: ${escapeHtml(err.message)}</p>`})}}
 function resetPositions(){const w=canvas.clientWidth,h=canvas.clientHeight,n=Math.max(nodes.length,1),radius=Math.max(40,Math.min(w,h)*.42);nodes.forEach((x,i)=>{const a=i*Math.PI*(3-Math.sqrt(5)),r=radius*Math.sqrt((i+1)/n);x.x=w/2+Math.cos(a)*r;x.y=h/2+Math.sin(a)*r;x.vx=x.vy=0});pan={x:0,y:0};scale=1;restartSimulation(n>2000?80:n>1000?140:240)}
 function simulate(){if(!nodes.length)return;const w=canvas.clientWidth,h=canvas.clientHeight,cx=w/2,cy=h/2,byId=new Map(nodes.map(n=>[n.id,n]));for(const e of edges){const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)continue;const dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)),strength=Math.max(-1.5,Math.min(1.5,(d-105)*.008)),fx=dx/d*strength,fy=dy/d*strength;a.vx+=fx;a.vy+=fy;b.vx-=fx;b.vy-=fy}const neighbours=nodes.length>1000?24:60;for(let i=0;i<nodes.length;i++){for(let j=i+1;j<Math.min(nodes.length,i+neighbours);j++){const a=nodes[i],b=nodes[j],dx=b.x-a.x,dy=b.y-a.y,d2=dx*dx+dy*dy+25,f=Math.min(.035,18/d2);a.vx-=dx*f;a.vy-=dy*f;b.vx+=dx*f;b.vy+=dy*f}}for(const n of nodes){if(n===drag)continue;n.vx=(n.vx+(cx-n.x)*.0004)*.86;n.vy=(n.vy+(cy-n.y)*.0004)*.86;const speed=Math.hypot(n.vx,n.vy);if(speed>8){n.vx=n.vx/speed*8;n.vy=n.vy/speed*8}n.x=Math.max(cx-w*.7,Math.min(cx+w*.7,n.x+n.vx));n.y=Math.max(cy-h*.7,Math.min(cy+h*.7,n.y+n.vy));if(!Number.isFinite(n.x)||!Number.isFinite(n.y)){n.x=cx+(Math.random()-.5)*40;n.y=cy+(Math.random()-.5)*40;n.vx=n.vy=0}}}
 function draw(){const w=canvas.clientWidth,h=canvas.clientHeight,showLabels=nodes.length<=1500;ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(pan.x,pan.y);ctx.scale(scale,scale);const byId=new Map(nodes.map(n=>[n.id,n]));ctx.lineWidth=1/scale;ctx.font=`${11/scale}px system-ui`;for(const e of edges){const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)continue;ctx.strokeStyle=e===hover?'#fff':'#36516c';ctx.lineWidth=e===hover?2.5/scale:1/scale;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();if(showLabels&&scale>.65){const x=(a.x+b.x)/2,y=(a.y+b.y)/2;ctx.fillStyle='#91a6ba';ctx.fillText(e.label.slice(0,28),x,y)}}for(const n of nodes){ctx.beginPath();ctx.arc(n.x,n.y,n===hover?9/scale:7/scale,0,Math.PI*2);ctx.fillStyle=color(n.kind);ctx.fill();if(showLabels&&scale>.55){ctx.fillStyle='#e8f0fa';ctx.fillText(n.label.slice(0,34),n.x+10/scale,n.y+4/scale)}}ctx.restore()}

@@ -249,7 +249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.action in {"all", "import"}:
             import_gold_database(args, driver)
         if args.action in {"all", "serve"}:
-            shared.serve(driver, args.database, args.host, args.port, args.open_browser)
+            shared.serve(driver, args.database, args.host, args.port, args.open_browser, args.sqlite)
     finally:
         driver.close()
     return 0
